@@ -29,6 +29,11 @@ export default function handleFinalPos(
     return `cell-area-${areaId}-id-${cellNum}`;
   };
 
+  // ===== clean up legacy DB strings =====
+  if (current_position === "null" || current_position === "undefined") {
+    current_position = null;
+  }
+
   // ===== parse current_position for main / home =====
   let areaId = null;
   let cellNum = null;

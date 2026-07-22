@@ -377,10 +377,9 @@ export const movePawn = async (io, socket, payload, ack) => {
               // update moves in capturing user row
               const [capturinguserUpdateResult] = await conn.execute(
                 `UPDATE users
-                    SET current_move_balance = current_move_balance + ?,
-                        moves = moves + ?
+                    SET current_move_balance = current_move_balance + ?
                   WHERE id = ?`,
-                [row.moves, row.moves, player_id]
+                [row.moves, player_id]
               );
               
               if (capturedPawnUpdateResult.affectedRows === 0 ||
@@ -707,7 +706,7 @@ export const movePawn = async (io, socket, payload, ack) => {
           board_id,
           pawn_id,
           player_id
-        }, ack);
+        }, null);
       }
       await advanceTurnAfterMove(io, board_id, player_id, dice_value);
       return safeAck({ ok: true, msg: "Move committed & broadcast", ...delta });

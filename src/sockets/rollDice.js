@@ -4,7 +4,6 @@ import handleFinalPos from "../utils/handleFinalPos.js";
 
 export const rollDice = async (io, socket, payload, ack) => {
   const safeAck = (x) => { try { ack?.(x); } catch {} };
-  console.log("rolldicePayload", payload);
 
   let conn = null;
   try {
@@ -12,7 +11,7 @@ export const rollDice = async (io, socket, payload, ack) => {
 
     // 🎲 Securely generate dice roll on the backend (1-6)
     // const dice_value = Math.floor(Math.random() * 6) + 1;
-    const dice_value = 6;
+    const dice_value = 4;
 
     // Basic validation
     if (!board_id || !player_id) {
@@ -75,12 +74,13 @@ export const rollDice = async (io, socket, payload, ack) => {
     );
 
     let valid_moves = false;
+    let validPawnIds = [];
     for (const pawn of playerPawns) {
       if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
       const moveResult = handleFinalPos(pawn.current_position, dice_value, pawn.color, pawn.type);
       if (moveResult && !moveResult.error) {
         valid_moves = true;
-        break;
+        validPawnIds.push(pawn.id);
       }
     }
 
@@ -155,6 +155,34 @@ export const rollDice = async (io, socket, payload, ack) => {
     // Give the player a fresh 30 seconds to actually perform their move!
     if (valid_moves !== false) {
       startTurnTimer(io, board_id);
+      
+      // 🔥 QOL AUTO-MOVE: If they have EXACTLY 1 valid pawn, move it automatically
+      // after a short 1.5s delay to allow the frontend dice rolling animation to finish!
+      if (validPawnIds.length === 1) {
+        const forcedPawnId = validPawnIds[0];
+        console.log(`[QOL] Only 1 valid pawn found for ${player_id}. Auto-moving pawn ${forcedPawnId} in 1.5s.`);
+        
+        setTimeout(async () => {
+          try {
+            const { movePawn } = await import('./movePawn.js');
+            const mockSocket = {
+              id: 'SERVER_SINGLE_PAWN_AUTO',
+              board_id: board_id,
+              player_id: player_id,
+              to: (room) => io.to(room),
+              emit: () => {} 
+            };
+            
+            await movePawn(io, mockSocket, {
+              board_id,
+              pawn_id: forcedPawnId,
+              player_id: player_id
+            }, () => {});
+          } catch(autoErr) {
+            console.error("QOL Auto-move failed:", autoErr);
+          }
+        }, 1500); 
+      }
     }
 
     // 🔥 AUTO-CLEAR DICE if no valid moves (merged diceClear logic)

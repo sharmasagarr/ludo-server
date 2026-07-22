@@ -65,6 +65,27 @@ export const recomputeTurnStateForBoard = async (io, board_id, shouldBroadcast =
   const timerNonce = Date.now();
   boardTurnState[board_id] = { mode, currentTurnPlayerId, turnOrder, timerNonce };
 
+  if (currentTurnPlayerId) {
+    try {
+      const [balRows] = await db.execute(
+        `SELECT current_dice_roll_balance FROM users WHERE id = ?`,
+        [currentTurnPlayerId]
+      );
+      if (balRows[0] && Number(balRows[0].current_dice_roll_balance) < 1) {
+        await db.execute(
+          `UPDATE users SET current_dice_roll_balance = 1 WHERE id = ?`,
+          [currentTurnPlayerId]
+        );
+        // Force an update to the connected players to unlock their UI
+        io.to(board_id).emit("playerStatsUpdated", [
+            { player_id: currentTurnPlayerId, current_dice_roll_balance: 1 }
+        ]);
+      }
+    } catch (e) {
+      console.error("Error replenishing balance on reconnect:", e);
+    }
+  }
+
   if (shouldBroadcast) {
     io.to(board_id).emit("turnStateUpdate", {
       board_id,
@@ -106,7 +127,68 @@ handleTurnTimeout = async (io, board_id) => {
   const timedOutPlayerId = currentTurnPlayerId;
   // console.log(`⏰ Turn timed out for player ${timedOutPlayerId} on board ${board_id}`);
 
-  // 🛑 1) CLEAR DICE IN DB FOR TIMED OUT PLAYER
+  // 🛑 0) ANTI-CHEAT: FORCED AUTO-MOVE
+  // If the player holds an active dice roll and has valid moves, force them to move!
+  try {
+    const [diceRows] = await db.execute(
+      `SELECT dice_value FROM dice_rolls WHERE player_id = ? AND current_board_id = ? AND dice_value IS NOT NULL`,
+      [timedOutPlayerId, board_id]
+    );
+
+    if (diceRows.length > 0) {
+      const pendingDiceValue = diceRows[0].dice_value;
+
+      const [playerPawns] = await db.execute(
+        `SELECT id, current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
+        [board_id, timedOutPlayerId]
+      );
+
+      const { default: handleFinalPos } = await import("../utils/handleFinalPos.js");
+      let validPawns = [];
+
+      for (const pawn of playerPawns) {
+        if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
+        const currPos = pawn.current_position; 
+        const moveResult = handleFinalPos(currPos, pendingDiceValue, pawn.color, pawn.type);
+        if (moveResult && !moveResult.error) {
+           validPawns.push(pawn.id);
+        }
+      }
+
+      // If they had legal moves, they were intentionally dodging! Force move.
+      if (validPawns.length > 0) {
+        const forcedPawnId = validPawns[Math.floor(Math.random() * validPawns.length)];
+        console.log(`[ANTI-CHEAT] Auto-forcing AFK move for player ${timedOutPlayerId} pawn ${forcedPawnId}`);
+        
+        const { movePawn } = await import('./movePawn.js');
+        const mockSocket = {
+          id: 'SERVER_AFK_AUTO',
+          board_id: board_id, // ensure payload spoof passes validation
+          player_id: timedOutPlayerId,
+          to: (room) => io.to(room),
+          emit: () => {} // stub
+        };
+
+        // Suppress errors during auto-move to ensure server continuity
+        try {
+          await movePawn(io, mockSocket, {
+            board_id,
+            pawn_id: forcedPawnId,
+            player_id: timedOutPlayerId
+          }, () => {});
+        } catch (autoErr) {
+          console.error("Auto-move failed, falling back to wipe:", autoErr);
+        }
+
+        // movePawn automatically processes advanceTurnAfterMove natively!
+        return; 
+      }
+    }
+  } catch (err) {
+    console.error("Failed to process auto-move intercept:", err);
+  }
+
+  // 🛑 1) NO VALID MOVES: CLEAR DICE IN DB FOR TIMED OUT PLAYER
   try {
     await db.execute(
       `INSERT INTO dice_rolls (player_id, current_board_id, dice_value, rolled_at)
@@ -216,6 +298,7 @@ export const canPlayerAct = async (io, board_id, player_id) => {
 };
 
 export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_value) => {
+  console.log(`[DEBUG] advanceTurnAfterMove called | player: ${lastPlayerId} | dice_value: ${dice_value} | Number(dice): ${Number(dice_value)}`);
   if (!board_id || !lastPlayerId) return;
 
   // Pass false to prevent a redundant broadcast just for reading the state
@@ -226,12 +309,12 @@ export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_valu
   }
 
   const { turnOrder } = state;
-  if (!turnOrder || turnOrder.length === 0) {
+  if (turnOrder.length === 0) {
     clearTurnTimer(board_id);
     return;
   }
 
-  if (dice_value === 6 && turnOrder.includes(lastPlayerId)) {
+  if (Number(dice_value) === 6 && turnOrder.includes(lastPlayerId)) {
     state.currentTurnPlayerId = lastPlayerId;
   } else {
     let idx = turnOrder.indexOf(lastPlayerId);
@@ -255,18 +338,15 @@ export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_valu
            u.name as playerName,
            COALESCE(u.current_dice_roll_balance, 0) as current_dice_roll_balance,
            COALESCE(u.current_move_balance, 0) as current_move_balance,
-           p.color
+           pn.color
          FROM (
-           SELECT player1 as player_id, 'blue' as color FROM boards WHERE id = ? AND player1 IS NOT NULL
-           UNION ALL
-           SELECT player2 as player_id, 'red' as color FROM boards WHERE id = ? AND player2 IS NOT NULL
-           UNION ALL
-           SELECT player3 as player_id, 'green' as color FROM boards WHERE id = ? AND player3 IS NOT NULL
-           UNION ALL
-           SELECT player4 as player_id, 'yellow' as color FROM boards WHERE id = ? AND player4 IS NOT NULL
+           SELECT player_id, board_id FROM pawns WHERE board_id = ? GROUP BY player_id, board_id
          ) p
-         INNER JOIN users u ON p.player_id = u.id`,
-        [board_id, board_id, board_id, board_id]
+         INNER JOIN users u ON p.player_id = u.id
+         LEFT JOIN (
+           SELECT player_id, MIN(color) as color FROM pawns WHERE board_id = ? GROUP BY player_id
+         ) pn ON pn.player_id = p.player_id`,
+        [board_id, board_id]
       );
 
       const parsedPlayers = updatedPlayers.map(p => ({
@@ -309,6 +389,9 @@ export const clearTurnTimer = (board_id) => {
 // Start (or restart) a 30s timer for the current turn player
 export const startTurnTimer = (io, board_id) => {
   clearTurnTimer(board_id);
+
+  // 🛑 TEMPORARILY DISABLED FOR TESTING/DEVELOPMENT
+  return;
 
   const state = boardTurnState[board_id];
   if (!state || state.mode !== "turn" || !state.currentTurnPlayerId) return;

@@ -41,17 +41,17 @@ export default function handleDangerZoneMove(current_position, pawnColor) {
 
   let moves_lost = 0;
   
-  // -1 Danger Zones
-  if (initialCellNum === 4 || initialCellNum === 16) {
+  // -1 Danger Zone
+  if (initialCellNum === 3) {
     moves_lost = 1;
   }
-  // -3 Danger Zones
-  else if (initialCellNum === 1 || initialCellNum === 18) {
-    moves_lost = 3;
-  }
-  // -6 Danger Zones
-  else if (initialCellNum === 6 || initialCellNum === 13) {
+  // -6 Danger Zone
+  else if (initialCellNum === 7) {
     moves_lost = 6;
+  }
+  // -3 Danger Zone
+  else if (initialCellNum === 18) {
+    moves_lost = 3;
   }
 
   if (moves_lost === 0) {

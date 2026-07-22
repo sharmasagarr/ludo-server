@@ -56,7 +56,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       const [[flmBeforeMove]] = await conn.execute(
-        `SELECT current_dice_roll_balance, current_move_balance, moves, kills, id
+        `SELECT current_dice_roll_balance, current_move_balance, kills, id
            FROM users
           WHERE id = ?`,
         [player_id]
@@ -118,10 +118,9 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
       // 4) Update FLM of the player who lost moves
       await conn.execute(
         `UPDATE users
-            SET moves = GREATEST(moves - ?, 0),
-                current_move_balance = GREATEST(current_move_balance - ?, 0)
+            SET current_move_balance = GREATEST(current_move_balance - ?, 0)
           WHERE id = ?`,
-        [moves_lost, moves_lost, player_id]
+        [moves_lost, player_id]
       );
 
 
@@ -221,11 +220,10 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
           const [capturerFlmUpdateResult] = await conn.execute(
             `UPDATE users
                 SET current_move_balance = current_move_balance + ?,
-                    moves = moves + ?,
                     kills = kills + ?,
                     current_dice_roll_balance = current_dice_roll_balance + 1
               WHERE id = ?`,
-            [capturedPawn.moves, capturedPawn.moves, kills, capturerPawn.player_id]
+            [capturedPawn.moves, kills, capturerPawn.player_id]
           );
 
 
