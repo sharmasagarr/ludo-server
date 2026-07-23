@@ -391,7 +391,7 @@ export const startTurnTimer = (io, board_id) => {
   clearTurnTimer(board_id);
 
   // 🛑 TEMPORARILY DISABLED FOR TESTING/DEVELOPMENT
-  return;
+  // return;
 
   const state = boardTurnState[board_id];
   if (!state || state.mode !== "turn" || !state.currentTurnPlayerId) return;

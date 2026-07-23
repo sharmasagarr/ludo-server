@@ -23,9 +23,6 @@ CREATE TABLE users (
     UNIQUE KEY uk_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-INSERT INTO users (username, name, password)
-VALUES ('testuser', 'Test Player', '1234');
-
 -- 2. Create Boards Table
 CREATE TABLE boards (
     id VARCHAR(36) NOT NULL DEFAULT (UUID()),
@@ -72,7 +69,7 @@ CREATE TABLE pawns (
     id VARCHAR(36) NOT NULL DEFAULT (UUID()),
     board_id VARCHAR(36) NOT NULL,
     player_id VARCHAR(36) NOT NULL,
-    type ENUM('main','home','base') NOT NULL,
+    type ENUM('main','home','base','center') NOT NULL,
     color ENUM('red','blue','green','yellow'),
     current_position VARCHAR(36),
     next_position VARCHAR(36),
