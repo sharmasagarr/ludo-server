@@ -69,17 +69,11 @@ export const playerJoined = async (io, socket, payload, ack) => {
           u.current_dice_roll_balance,
           u.current_move_balance,
           u.diamonds,
-          '' AS teamName,
-          0 AS hearts,
-          0 AS spades,
           COALESCE(pn.moves, 0)         AS moves,
           COALESCE(pn.moves_lost, 0)     AS moves_lost,
           COALESCE(pn.color, '')        AS color,
           COALESCE(pn.home, 0)          AS home,
-          pn.last_moved_at                AS last_moved_at,
-          ''             AS activePlayerId,
-          u.name AS activePlayerName,
-          'user' AS activePlayerRole
+          pn.last_moved_at                AS last_moved_at
         FROM boards b
         LEFT JOIN users u
           ON u.id IN (b.player1, b.player2, b.player3, b.player4)
@@ -104,8 +98,6 @@ export const playerJoined = async (io, socket, payload, ack) => {
         LEFT JOIN dice_rolls dr
           ON dr.current_board_id = b.id
          AND dr.player_id       = u.id
-
-        
 
         WHERE b.id = ?
         ORDER BY pn.color`,
@@ -191,7 +183,6 @@ export const playerJoined = async (io, socket, payload, ack) => {
       board_id,
       player_id,
       playerName: players.find((player) => player.player_id === player_id).playerName, 
-      teamName: players.find((player) => player.player_id === player_id).teamName,
       turnState,
       socketId: socket.id,
       joinedAt: socket.joinedAt,
@@ -221,20 +212,10 @@ export const playerJoined = async (io, socket, payload, ack) => {
         board_id: board.id,
         players: players.map((r) => ({
           player_id: r.player_id,
-          activePlayer: r.activePlayerId
-            ? {
-                id: r.activePlayerId,
-                name: r.activePlayerName,
-                role: r.activePlayerRole,
-              }
-            : null,
           playerName: r.playerName,
           kills: Number(r.kills ?? 0),
           color: r.color,
           home: Number(r.home ?? 0),
-          hearts: Number(r.hearts ?? 0),
-          spades: Number(r.spades ?? 0),
-          teamName: r.teamName,
           current_dice_roll_balance: Number(r.current_dice_roll_balance ?? 0),
           moves: Number(r.moves ?? 0),
           moves_lost: Number(r.moves_lost ?? 0),

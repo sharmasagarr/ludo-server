@@ -434,17 +434,8 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
             u.current_dice_roll_balance,
             u.current_move_balance,
             u.diamonds,
-            '' AS teamName,
-            0 AS hearts,
-            0 AS spades,
             COALESCE(pn.moves, 0)         AS moves,
             COALESCE(pn.moves_lost, 0)     AS moves_lost,
-            COALESCE(pn.color, '')        AS color,
-            COALESCE(pn.home, 0)          AS home,
-            pn.last_moved_at                AS last_moved_at,
-            ''             AS activePlayerId,
-            u.name AS activePlayerName,
-            'user' AS activePlayerRole
           FROM boards b
           -- tie the board
           INNER JOIN users u
@@ -524,7 +515,6 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
         updatedPlayers = flmRows.map((r) => ({
           player_id: r.player_id,
-          activePlayer: r.activePlayerId ? {id: r.activePlayerId, name: r.activePlayerName, role: r.activePlayerRole} : null ,
           playerName: r.playerName,
           kills: Number(r.kills ?? 0),
           current_dice_roll_balance: Number(r.current_dice_roll_balance ?? 0),
@@ -535,7 +525,6 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
           hearts: Number(r.hearts ?? 0),
           spades: Number(r.spades ?? 0),
           home: Number(r.home ?? 0),
-          teamName: r.teamName,
           diamonds: Number(r.diamonds ?? 0),
           winPosition: getWinPosition(r.player_id),
           rank: getRank(r.player_id, flmRows),
