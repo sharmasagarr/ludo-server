@@ -576,7 +576,7 @@ export const movePawn = async (io, socket, payload, ack) => {
             u.current_move_balance,
             u.diamonds,
             COALESCE(pn.moves, 0)         AS moves,
-            COALESCE(pn.moves_lost, 0)     AS moves_lost,
+            COALESCE(pn.moves_lost, 0)     AS moves_lost
           FROM boards b
           -- tie the board
           INNER JOIN users u
