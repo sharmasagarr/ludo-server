@@ -1,43 +1,28 @@
 import cron from "node-cron";
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { formatISTDateTimeForSQL, formatISTDateForSQL, getISTDateTime } from "./istDateTime.js";
-import { RowDataPacket } from "mysql2/promise";
 
 /**
  * Check and finish expired boards based on end_time
  * Runs daily at 12:00 AM IST
  */
 export const checkExpiredBoards = async (): Promise<void> => {
-  const connection = await db.getConnection();
   try {
     console.log(`[Cron Job] Checking expired boards at ${formatISTDateTimeForSQL()}`);
 
-    // Get current IST date (start of day)
-    // getISTDateTime() returns a Date object where UTC methods represent IST time
     const now = getISTDateTime();
     const todayStart = new Date(now);
     todayStart.setUTCHours(0, 0, 0, 0);
     const todayStartIST = formatISTDateTimeForSQL(todayStart);
-    
-    // Also get just the date part for comparison
     const todayDateIST = formatISTDateForSQL(todayStart);
 
-    // Find boards where end_time has passed and status is not 'finished'
-    // Logic: If end_time is 2025-11-30 00:00:00, the board expires at 2025-11-30 00:00:00
-    // The board is valid until end_time, and expires when current time >= end_time
-    // We check: end_time <= NOW()
-    // Example: If now is 2025-11-30 00:00:00 and end_time is 2025-11-30 00:00:00:
-    //   2025-11-30 00:00:00 <= 2025-11-30 00:00:00 = TRUE, so it expires
-    //
-    // end_time is stored in IST, and we compare with current IST datetime
-    const [expiredBoards] = await connection.execute<RowDataPacket[]>(
-      `SELECT id, player1, player2, player3, player4, winner1, winner2, winner3, loser
-       FROM boards
-       WHERE end_time IS NOT NULL
-         AND end_time <= ?
-         AND status != 'finished'`,
-      [formatISTDateTimeForSQL()]  // Use current IST datetime
-    );
+    const nowStr = formatISTDateTimeForSQL();
+    const expiredBoards = await prisma.board.findMany({
+      where: {
+        end_time: { not: null, lte: new Date(nowStr) },
+        status: { not: "finished" }
+      }
+    });
 
     if (expiredBoards.length === 0) {
       console.log(`[Cron Job] No expired boards found`);
@@ -46,7 +31,7 @@ export const checkExpiredBoards = async (): Promise<void> => {
 
     console.log(`[Cron Job] Found ${expiredBoards.length} expired board(s)`);
 
-    await connection.beginTransaction();
+    await prisma.$transaction(async (tx: any) => {
 
     for (const board of expiredBoards) {
       // Check if board already has all winners set
@@ -59,25 +44,20 @@ export const checkExpiredBoards = async (): Promise<void> => {
           board.player2,
           board.player3,
           board.player4,
-        ].filter(Boolean);
+        ].filter((p): p is string => !!p);
 
         // Calculate total moves earned for each player on this board from move_logs
-        const [playerMoves] = await connection.execute<RowDataPacket[]>(
-          `SELECT 
-            ml.player_id,
-            SUM(CASE WHEN ml.actual_moves > 0 THEN ml.actual_moves ELSE 0 END) AS totalMoves
-           FROM move_logs ml
-           WHERE ml.board_id = ?
-             AND ml.actual_moves IS NOT NULL
-           GROUP BY ml.player_id
-           ORDER BY totalMoves DESC`,
-          [board.id]
-        );
+        const playerMoves = await tx.moveLog.groupBy({
+          by: ['player_id'],
+          where: { board_id: board.id, actual_moves: { gt: 0 } },
+          _sum: { actual_moves: true },
+          orderBy: { _sum: { actual_moves: 'desc' } }
+        });
 
         // Create a map of player_id to moves
         const movesMap = new Map();
         for (const pm of playerMoves) {
-          movesMap.set(pm.player_id, Number(pm.totalMoves) || 0);
+          movesMap.set(pm.player_id, Number(pm._sum.actual_moves) || 0);
         }
 
         // Ensure all players are in the map (with 0 moves if no moves logged)
@@ -121,44 +101,37 @@ export const checkExpiredBoards = async (): Promise<void> => {
         }
 
         // Update board with winners, loser, status, and end_time
-        const endTimeIST = formatISTDateTimeForSQL();
-        await connection.execute(
-          `UPDATE boards 
-           SET winner1 = ?,
-               winner2 = ?,
-               winner3 = ?,
-               loser = ?,
-               status = 'finished',
-               end_time = ?
-           WHERE id = ?`,
-          [winner1, winner2, winner3, loser, endTimeIST, board.id]
-        );
+        const endTimeIST = new Date(formatISTDateTimeForSQL());
+        await tx.board.update({
+          where: { id: board.id },
+          data: {
+            winner1,
+            winner2,
+            winner3,
+            loser,
+            status: "finished",
+            end_time: endTimeIST
+          }
+        });
 
         console.log(
           `[Cron Job] Board ${board.id} finished: Winner1=${winner1}, Winner2=${winner2}, Winner3=${winner3}, Loser=${loser}`
         );
       } else {
         // Board already has winners, just mark as finished
-        const endTimeIST = formatISTDateTimeForSQL();
-        await connection.execute(
-          `UPDATE boards 
-           SET status = 'finished',
-               end_time = ?
-           WHERE id = ?`,
-          [endTimeIST, board.id]
-        );
+        const endTimeIST = new Date(formatISTDateTimeForSQL());
+        await tx.board.update({
+          where: { id: board.id },
+          data: { status: "finished", end_time: endTimeIST }
+        });
 
-        console.log(`[Cron Job] Board ${board.id} marked as finished (winners already set)`);
+      console.log(`[Cron Job] Board ${board.id} marked as finished (winners already set)`);
       }
     }
-
-    await connection.commit();
-    console.log(`[Cron Job] Successfully processed ${expiredBoards.length} expired board(s)`);
+  });
+  console.log(`[Cron Job] Successfully processed ${expiredBoards.length} expired board(s)`);
   } catch (error) {
-    if (connection) await connection.rollback();
     console.error("[Cron Job] Error checking expired boards:", error);
-  } finally {
-    if (connection) connection.release();
   }
 };
 

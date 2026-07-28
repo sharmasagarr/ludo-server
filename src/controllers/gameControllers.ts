@@ -1,29 +1,23 @@
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { v7 as uuidv7 } from "uuid";
 import { Response } from "express";
 import { AuthRequest } from "../types/index.js";
-import { RowDataPacket } from "mysql2/promise";
 
 // Default colors for joining players (Blue first, opposite is Green, then Red, Yellow)
 const PLAYER_COLORS = ["blue", "green", "red", "yellow"];
 
-// Initialize 4 pawns for a player entering the game
-const initializePawns = async (board_id: string, player_id: string, color: string): Promise<void> => {
-  const pawnValues = Array.from({ length: 4 }).map(() => [
-    uuidv7(),
+const initializePawns = async (board_id: string, player_id: string, color: "red"|"blue"|"green"|"yellow"): Promise<void> => {
+  const pawnData = Array.from({ length: 4 }).map(() => ({
     board_id,
     player_id,
-    "base", // Starting inside the base
+    type: "base" as const,
     color,
-    null,
-    null,
-    1, // is_safe
-  ]);
+    is_safe: true,
+  }));
   
-  await db.query(
-    `INSERT INTO pawns (id, board_id, player_id, type, color, current_position, next_position, is_safe) VALUES ?`, 
-    [pawnValues]
-  );
+  await prisma.pawn.createMany({
+    data: pawnData
+  });
 };
 
 export const createGame = async (req: AuthRequest, res: Response): Promise<void> => {
@@ -35,16 +29,19 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
   }
 
   try {
-    const board_id = uuidv7();
-    
-    // Create new board
-    await db.query(
-      `INSERT INTO boards (id, player1, creator, creation_mode, status) VALUES (?, ?, ?, 'manual', 'active')`,
-      [board_id, player_id, player_id]
-    );
+    const board = await prisma.board.create({
+      data: {
+        player1: player_id,
+        creator: player_id,
+        creation_mode: "manual",
+        status: "active"
+      }
+    });
+
+    const board_id = board.id;
 
     // Initialize pawns for Player 1 (Red by default)
-    await initializePawns(board_id, player_id, PLAYER_COLORS[0]);
+    await initializePawns(board_id, player_id, PLAYER_COLORS[0] as any);
 
     res.status(200).json({
       success: true,
@@ -67,13 +64,11 @@ export const joinGame = async (req: AuthRequest, res: Response): Promise<void> =
   }
 
   try {
-    const [boards] = await db.query<RowDataPacket[]>(`SELECT * FROM boards WHERE id = ?`, [board_id]);
-    if (boards.length === 0) {
+    const board = await prisma.board.findUnique({ where: { id: board_id } });
+    if (!board) {
       res.status(404).json({ success: false, message: "Board not found" });
       return;
     }
-
-    const board = boards[0];
 
     if (board.status !== 'active') {
        res.status(400).json({ success: false, message: "Game is not active" });
@@ -98,8 +93,12 @@ export const joinGame = async (req: AuthRequest, res: Response): Promise<void> =
       return;
     }
 
-    await db.query(`UPDATE boards SET ${slotToFill} = ? WHERE id = ?`, [player_id, board_id]);
-    await initializePawns(board_id, player_id, PLAYER_COLORS[colorIndex]);
+    await prisma.board.update({
+      where: { id: board_id },
+      data: { [slotToFill]: player_id }
+    });
+
+    await initializePawns(board_id, player_id, PLAYER_COLORS[colorIndex] as any);
 
     res.status(200).json({
       success: true,

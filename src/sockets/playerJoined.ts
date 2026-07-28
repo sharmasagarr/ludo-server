@@ -1,8 +1,7 @@
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { recomputeTurnStateForBoard } from "./turnState.js"; 
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
-import { RowDataPacket, PoolConnection } from "mysql2/promise";
 
 export const playerJoined = async (io: Server, socket: GameSocket, payload: any, ack?: any) => {
   const safeAck = (x: any) => {
@@ -11,11 +10,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
     } catch {}
   };
 
-  let connection: PoolConnection | null = null;
-
   try {
-    connection = await db.getConnection();
-
     const { player_id } = payload ?? {};
 
     // ---- validation ----
@@ -28,23 +23,30 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
     }
 
     // ---- fetch active board for this player ----
-    const [boardRows] = await connection.execute<RowDataPacket[]>(
-      `SELECT * FROM boards 
-       WHERE status = 'active'
-         AND (player1 = ? OR player2 = ? OR player3 = ? OR player4 = ?)
-       ORDER BY start_time DESC, id DESC
-       LIMIT 1`,
-      [player_id, player_id, player_id, player_id]
-    );
+    const activeBoard = await prisma.board.findFirst({
+      where: {
+        status: "active",
+        OR: [
+          { player1: player_id },
+          { player2: player_id },
+          { player3: player_id },
+          { player4: player_id },
+        ]
+      },
+      orderBy: [
+        { start_time: 'desc' },
+        { id: 'desc' },
+      ]
+    });
 
-    if (boardRows.length === 0) {
+    if (!activeBoard) {
       return safeAck({
         ok: false,
         msg: "Active board not found for this user",
       });
     }
 
-    const board = boardRows[0];
+    const board = activeBoard;
     const board_id = board.id;
 
     const playerIds = [
@@ -52,88 +54,67 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
       board.player2,
       board.player3,
       board.player4,
-    ].filter((pid) => pid && pid !== "");
+    ].filter((pid): pid is string => !!pid && pid !== "");
 
     // ---- fetch pawns for this board ----
-    const [pawns] = await (connection as PoolConnection).execute<RowDataPacket[]>(
-      `SELECT * FROM pawns WHERE board_id = ? ORDER BY player_id, id`,
-      [board.id]
-    );
+    const pawns = await prisma.pawn.findMany({
+      where: { board_id },
+      orderBy: [{ player_id: 'asc' }, { id: 'asc' }]
+    });
 
     // ---- fetch players aggregation ----
     let players: any[] = [];
-
     if (playerIds.length > 0) {
-      const [playersRows] = await connection.execute<RowDataPacket[]>(
-        `SELECT
-          u.id AS player_id,
-          u.name AS playerName,
-          COALESCE(pn.kills, 0)         AS kills,
-          u.current_dice_roll_balance,
-          u.current_move_balance,
-          u.diamonds,
-          COALESCE(pn.moves, 0)         AS moves,
-          COALESCE(pn.moves_lost, 0)     AS moves_lost,
-          COALESCE(pn.color, '')        AS color,
-          COALESCE(pn.home, 0)          AS home,
-          pn.last_moved_at                AS last_moved_at
-        FROM boards b
-        LEFT JOIN users u
-          ON u.id IN (b.player1, b.player2, b.player3, b.player4)
+      const usersInfo = await prisma.user.findMany({
+        where: { id: { in: playerIds } },
+        select: {
+          id: true,
+          name: true,
+          current_dice_roll_balance: true,
+          current_move_balance: true,
+          diamonds: true
+        }
+      });
+      // Merge with pawn stats natively
+      players = usersInfo.map((u: any) => {
+        const userPawns = pawns.filter((p: any) => p.player_id === u.id);
+        const homeCount = userPawns.filter((p: any) => p.type === 'center').length;
+        const totalKills = userPawns.reduce((sum: number, p: any) => sum + (p.kills || 0), 0);
+        const totalMoves = userPawns.reduce((sum: number, p: any) => sum + (p.moves || 0), 0);
+        const totalMovesLost = userPawns.reduce((sum: number, p: any) => sum + (p.moves_lost || 0), 0);
+        const color = userPawns.length > 0 ? userPawns[0].color : "";
+        const maxMovedAt = userPawns.reduce((max: Date | null, p: any) => p.last_moved_at && (!max || p.last_moved_at > max) ? p.last_moved_at : max, null as Date | null);
 
-        -- aggregated pawns per player (home count + representative color + moves count)
-        LEFT JOIN (
-          SELECT 
-            player_id, 
-            board_id,
-            SUM(CASE WHEN type = 'center' THEN 1 ELSE 0 END) AS home,
-            SUM(kills)        AS kills,
-            SUM(moves)        AS moves,
-            MIN(color)        AS color,
-            SUM(moves_lost)    AS moves_lost,
-            MAX(last_moved_at)  AS last_moved_at
-          FROM pawns
-          WHERE board_id = ?
-          GROUP BY player_id, board_id
-        ) pn ON pn.player_id = u.id AND pn.board_id = b.id
-
-        -- dice_rolls join on current_board_id + player_id
-        LEFT JOIN dice_rolls dr
-          ON dr.current_board_id = b.id
-         AND dr.player_id       = u.id
-
-        WHERE b.id = ?
-        ORDER BY pn.color`,
-        [board.id, board.id]
-      );
-
-      players = playersRows;
+        return {
+          player_id: u.id,
+          playerName: u.name,
+          kills: totalKills,
+          current_dice_roll_balance: u.current_dice_roll_balance,
+          current_move_balance: u.current_move_balance,
+          diamonds: u.diamonds,
+          moves: totalMoves,
+          moves_lost: totalMovesLost,
+          color,
+          home: homeCount,
+          last_moved_at: maxMovedAt
+        };
+      });
+      
+      players.sort((a, b) => String(a.color || "").localeCompare(String(b.color || "")));
     }
 
     // ---- fetch dice values for this board ----
-    let dice_value: RowDataPacket[] = [];
-    const [diceRows] = await (connection as PoolConnection).execute<RowDataPacket[]>(
-      `SELECT
-        p.player_id,
-        u.name,
-        dice_value,
-        dr.rolled_at
-      FROM (
-        -- Unpivot the player columns into rows
-        SELECT id as board_id, player1 as player_id FROM boards WHERE id = ?
-        UNION ALL
-        SELECT id as board_id, player2 as player_id FROM boards WHERE id = ?
-        UNION ALL
-        SELECT id as board_id, player3 as player_id FROM boards WHERE id = ? AND player3 IS NOT NULL
-        UNION ALL
-        SELECT id as board_id, player4 as player_id FROM boards WHERE id = ? AND player4 IS NOT NULL
-      ) p
-      INNER JOIN users u ON p.player_id = u.id
-      LEFT JOIN dice_rolls dr ON dr.player_id = p.player_id
-      ORDER BY dr.rolled_at DESC`,
-      [board.id, board.id, board.id, board.id]
-    );
-    dice_value = diceRows;
+    const diceRolls = await prisma.diceRoll.findMany({
+      where: { current_board_id: board_id },
+      include: { player: { select: { name: true } } },
+      orderBy: { rolled_at: 'desc' }
+    });
+    const dice_value = diceRolls.map((dr: any) => ({
+      player_id: dr.player_id,
+      name: dr.player.name,
+      dice_value: dr.dice_value,
+      rolled_at: dr.rolled_at
+    }));
 
     // ---- helper functions ----
     const getWinPosition = (pid: string) => {
@@ -239,13 +220,5 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
       msg: "Failed to join game",
       error: error.message,
     });
-  } finally {
-    if (connection) {
-      try {
-        connection.release();
-      } catch (e) {
-        console.error("Error releasing connection:", e);
-      }
-    }
   }
 };

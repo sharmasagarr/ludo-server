@@ -1,8 +1,7 @@
 import jwt from "jsonwebtoken";
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { Response, NextFunction } from "express";
 import { AuthRequest, AuthenticatedUser } from "../types/index.js";
-import { RowDataPacket } from "mysql2/promise";
 
 export const authenticateUser = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
@@ -16,12 +15,12 @@ export const authenticateUser = async (req: AuthRequest, res: Response, next: Ne
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "supersecretkey") as AuthenticatedUser;
     
     // Check if user is deleted or inactive
-    const [users] = await db.query<RowDataPacket[]>(
-      `SELECT status, is_deleted FROM users WHERE id = ?`,
-      [decoded.id]
-    );
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { status: true, is_deleted: true }
+    });
 
-    if (users.length === 0 || users[0].is_deleted || users[0].status === 0) {
+    if (!user || user.is_deleted || !user.status) {
       res.status(403).json({ message: "Account disabled or deleted." });
       return;
     }

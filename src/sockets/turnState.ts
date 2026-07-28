@@ -1,7 +1,6 @@
 import type { GameSocket } from "../types/index.js";
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { Server } from "socket.io";
-import { RowDataPacket } from "mysql2/promise";
 
 const boardTurnState: Record<string, any> = {};
 const boardTurnTimers: Record<string, any> = {};
@@ -19,25 +18,31 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
   );
 
   // 2) get dice balance of all players of this board
-  const [rows] = await db.execute<RowDataPacket[]>(
-      `
-      SELECT u.id AS player_id,
-        COALESCE(u.current_dice_roll_balance, 0) AS current_dice_roll_balance
-      FROM boards b
-      JOIN users u
-        ON u.id IN (b.player1, b.player2, b.player3, b.player4)
-      WHERE b.id = ?
-      `,
-      [board_id]
-  );
+  const board = await prisma.board.findUnique({
+    where: { id: board_id }
+  });
+
+  if (!board) return;
+
+  const playerIds = [board.player1, board.player2, board.player3, board.player4].filter((pid): pid is string => !!pid);
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: playerIds } },
+    select: { id: true, current_dice_roll_balance: true }
+  });
+
+  const rows = users.map((u: any) => ({
+    player_id: u.id,
+    current_dice_roll_balance: Number(u.current_dice_roll_balance || 0)
+  }));
 
   const activeTurnPlayers = rows
       .filter(
-          (r) =>
+          (r: any) =>
           r.player_id &&
           onlineIds.has(r.player_id)
       )
-      .map((r) => r.player_id);
+      .map((r: any) => r.player_id);
 
   let mode: string;
   let currentTurnPlayerId: string | null = null;
@@ -70,15 +75,13 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
 
   if (currentTurnPlayerId) {
     try {
-      const [balRows] = await db.execute<RowDataPacket[]>(
-        `SELECT current_dice_roll_balance FROM users WHERE id = ?`,
-        [currentTurnPlayerId]
-      );
-      if (balRows[0] && Number(balRows[0].current_dice_roll_balance) < 1) {
-        await db.execute(
-          `UPDATE users SET current_dice_roll_balance = 1 WHERE id = ?`,
-          [currentTurnPlayerId]
-        );
+      const u = await prisma.user.findUnique({ where: { id: currentTurnPlayerId } });
+      
+      if (u && Number(u.current_dice_roll_balance || 0) < 1) {
+        await prisma.user.update({
+          where: { id: currentTurnPlayerId },
+          data: { current_dice_roll_balance: 1 }
+        });
         // Force an update to the connected players to unlock their UI
         io.to(board_id).emit("playerStatsUpdated", [
             { player_id: currentTurnPlayerId, current_dice_roll_balance: 1 }
@@ -133,26 +136,29 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
   // 🛑 0) ANTI-CHEAT: FORCED AUTO-MOVE
   // If the player holds an active dice roll and has valid moves, force them to move!
   try {
-    const [diceRows] = await db.execute<RowDataPacket[]>(
-      `SELECT dice_value FROM dice_rolls WHERE player_id = ? AND current_board_id = ? AND dice_value IS NOT NULL`,
-      [timedOutPlayerId, board_id]
-    );
+    const diceRoll = await prisma.diceRoll.findFirst({
+      where: {
+        player_id: timedOutPlayerId,
+        current_board_id: board_id,
+        dice_value: { not: null }
+      }
+    });
 
-    if (diceRows.length > 0) {
-      const pendingDiceValue = diceRows[0].dice_value;
+    if (diceRoll) {
+      const pendingDiceValue = diceRoll.dice_value;
 
-      const [playerPawns] = await db.execute<RowDataPacket[]>(
-        `SELECT id, current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
-        [board_id, timedOutPlayerId]
-      );
+      const playerPawns = await prisma.pawn.findMany({
+        where: { board_id, player_id: timedOutPlayerId },
+        select: { id: true, current_position: true, color: true, type: true }
+      });
 
       const { default: handleFinalPos } = await import("../utils/handleFinalPos.js");
       let validPawns = [];
 
       for (const pawn of playerPawns) {
         if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
-        const currPos = pawn.current_position; 
-        const moveResult = handleFinalPos(currPos, pendingDiceValue, pawn.color, pawn.type);
+        const currPos = pawn.current_position || "0"; 
+        const moveResult = handleFinalPos(currPos, Number(pendingDiceValue || 0), String(pawn.color || "red") as any, pawn.type as any);
         if (moveResult && !moveResult.error) {
            validPawns.push(pawn.id);
         }
@@ -193,31 +199,34 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
 
   // 🛑 1) NO VALID MOVES:          // Clear dice row (set to null) instead of deleting
   try {
-    await db.execute(
-      `INSERT INTO dice_rolls (player_id, current_board_id, dice_value, rolled_at)
-       VALUES (?, ?, NULL, NOW())
-       ON DUPLICATE KEY UPDATE current_board_id = VALUES(current_board_id), dice_value = NULL, rolled_at = NOW()`,
-      [timedOutPlayerId, board_id]
-    );
+    await prisma.diceRoll.upsert({
+      where: { player_id: timedOutPlayerId },
+      update: {
+        current_board_id: board_id,
+        dice_value: null,
+        rolled_at: new Date()
+      },
+      create: {
+        player_id: timedOutPlayerId,
+        current_board_id: board_id,
+        dice_value: null,
+        rolled_at: new Date()
+      }
+    });
 
     // Fetch refreshed players dice row to broadcast (as seen in rollDice auto-clear)
-    const [updatedPlayers] = await db.execute<RowDataPacket[]>(
-      `SELECT 
-         p.player_id, u.name, dr.dice_value, dr.rolled_at
-       FROM (
-         SELECT id as board_id, player1 as player_id FROM boards WHERE id = ?
-         UNION ALL
-         SELECT id as board_id, player2 as player_id FROM boards WHERE id = ?
-         UNION ALL
-         SELECT id as board_id, player3 as player_id FROM boards WHERE id = ? AND player3 IS NOT NULL
-         UNION ALL
-         SELECT id as board_id, player4 as player_id FROM boards WHERE id = ? AND player4 IS NOT NULL
-       ) p
-       INNER JOIN users u ON p.player_id = u.id
-       LEFT JOIN dice_rolls dr ON dr.player_id = p.player_id
-       ORDER BY dr.rolled_at DESC`,
-      [board_id, board_id, board_id, board_id]
-    );
+    const diceRolls = await prisma.diceRoll.findMany({
+      where: { current_board_id: board_id },
+      include: { player: { select: { name: true } } },
+      orderBy: { rolled_at: 'desc' }
+    });
+
+    const updatedPlayers = diceRolls.map((dr: any) => ({
+      player_id: dr.player_id,
+      name: dr.player.name,
+      dice_value: dr.dice_value,
+      rolled_at: dr.rolled_at
+    }));
 
     const sockets = await io.in(board_id).fetchSockets();
 
@@ -225,7 +234,7 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
       board_id,
       player_id: timedOutPlayerId,
       dice_value: null,
-      allPlayersDice: updatedPlayers.map(p => {
+      allPlayersDice: updatedPlayers.map((p: any) => {
         const s = sockets.find(s => (s as unknown as GameSocket).player_id === p.player_id);
         return {
           player_id: p.player_id,
@@ -282,15 +291,12 @@ export const canPlayerAct = async (io: Server, board_id: string, player_id: stri
   }
   const state = boardTurnState[board_id];
 
-  const [balanceRows] = await db.execute<RowDataPacket[]>(
-    `SELECT COALESCE(current_dice_roll_balance, 0) AS balance
-     FROM users
-     WHERE id = ?`,
-    [player_id]
-  );
-  const row = balanceRows[0] as any;
+  const u = await prisma.user.findUnique({
+    where: { id: player_id },
+    select: { current_dice_roll_balance: true }
+  });
 
-  const balance = Number(row?.balance ?? 0);
+  const balance = Number(u?.current_dice_roll_balance ?? 0);
 
   if (balance <= 0) {
     return { ok: false, reason: "NO_BALANCE" };
@@ -336,34 +342,40 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
   // Ensure the incoming turn player has a dice roll balance of 1 so their client UI unlocks
   if (state.currentTurnPlayerId) {
     try {
-      await db.execute(
-        `UPDATE users SET current_dice_roll_balance = 1 WHERE id = ?`,
-        [state.currentTurnPlayerId]
-      );
+      await prisma.user.update({
+        where: { id: state.currentTurnPlayerId },
+        data: { current_dice_roll_balance: 1 }
+      });
       
-      // Broadcast updated players (including dice balance) so frontends unlock their UI dice
-      const [updatedPlayers] = await db.execute<RowDataPacket[]>(
-        `SELECT 
-           u.id as player_id,
-           u.name as playerName,
-           COALESCE(u.current_dice_roll_balance, 0) as current_dice_roll_balance,
-           COALESCE(u.current_move_balance, 0) as current_move_balance,
-           pn.color
-         FROM (
-           SELECT player_id, board_id FROM pawns WHERE board_id = ? GROUP BY player_id, board_id
-         ) p
-         INNER JOIN users u ON p.player_id = u.id
-         LEFT JOIN (
-           SELECT player_id, MIN(color) as color FROM pawns WHERE board_id = ? GROUP BY player_id
-         ) pn ON pn.player_id = p.player_id`,
-        [board_id, board_id]
-      );
+      const board = await prisma.board.findUnique({ where: { id: board_id } });
+      if (!board) return;
+      const playerIds = [board.player1, board.player2, board.player3, board.player4].filter((pid): pid is string => !!pid);
 
-      const parsedPlayers = updatedPlayers.map(p => ({
-        ...p,
-        current_dice_roll_balance: Number(p.current_dice_roll_balance ?? 0),
-        current_move_balance: Number(p.current_move_balance ?? 0),
-      }));
+      const users = await prisma.user.findMany({
+        where: { id: { in: playerIds } },
+        select: {
+          id: true,
+          name: true,
+          current_dice_roll_balance: true,
+          current_move_balance: true,
+        }
+      });
+      
+      const pawns = await prisma.pawn.findMany({
+        where: { board_id }
+      });
+
+      const parsedPlayers = users.map((u: any) => {
+        const userPawns = pawns.filter((p: any) => p.player_id === u.id);
+        const color = userPawns.length > 0 ? userPawns[0].color : "";
+        return {
+          player_id: u.id,
+          playerName: u.name,
+          current_dice_roll_balance: Number(u.current_dice_roll_balance ?? 0),
+          current_move_balance: Number(u.current_move_balance ?? 0),
+          color
+        };
+      });
 
       io.to(board_id).emit("playerStatsUpdated", parsedPlayers);
       

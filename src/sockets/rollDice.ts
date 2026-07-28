@@ -1,14 +1,12 @@
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { canPlayerAct, recomputeTurnStateForBoard, advanceTurnAfterMove, startTurnTimer } from "./turnState.js"; 
 import handleFinalPos from "../utils/handleFinalPos.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
-import { RowDataPacket, PoolConnection } from "mysql2/promise";
 
 export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
   const safeAck = (x: any) => { try { ack?.(x); } catch {} };
 
-  let conn: PoolConnection | null = null;
   try {
     const { board_id, player_id } = payload ?? {};
 
@@ -41,11 +39,11 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
     }
 
     // 🔒 PENDING DICE CHECK: Prevent re-rolling if they already have an unspent dice value
-    const [existingRolls] = await db.execute<RowDataPacket[]>(
-      `SELECT dice_value FROM dice_rolls WHERE player_id = ? AND dice_value IS NOT NULL`,
-      [player_id]
-    );
-    if (existingRolls.length > 0) {
+    const existingRolls = await prisma.diceRoll.findFirst({
+      where: { player_id, dice_value: { not: null } }
+    });
+    
+    if (existingRolls) {
       return safeAck({ ok: false, msg: "You must spend your active dice roll before rolling again." });
     }
 
@@ -56,25 +54,26 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
       timestamp: new Date().toISOString()
     });
 
-    // get a transaction connection
-    conn = await db.getConnection();
-    await conn.beginTransaction();
+    let valid_moves = false;
+    let validPawnIds: string[] = [];
+    let allPlayers: any[] = [];
 
-    // If dice is not 6, decrement the player's current_dice_roll_balance
-    if (dice_value !== 6) {
-      await conn.execute(
-        `UPDATE users 
-         SET current_dice_roll_balance = GREATEST(COALESCE(current_dice_roll_balance,0) - 1, 0)
-         WHERE id = ?`,
-        [player_id]
-      );
-    }
+    await prisma.$transaction(async (tx: any) => {
+      // If dice is not 6, decrement the player's current_dice_roll_balance
+      if (dice_value !== 6) {
+        const u = await tx.user.findUnique({ where: { id: player_id } });
+        if (u && Number(u.current_dice_roll_balance || 0) > 0) {
+          await tx.user.update({
+            where: { id: player_id },
+            data: { current_dice_roll_balance: { decrement: 1 } }
+          });
+        }
+      }
 
-    // Determine valid_moves completely on the backend
-    const [playerPawns] = await (conn as PoolConnection).execute<RowDataPacket[]>(
-      `SELECT id, current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
-      [board_id, player_id]
-    );
+      // Determine valid_moves completely on the backend
+      const playerPawns = await tx.pawn.findMany({
+        where: { board_id, player_id }
+      });
 
     let valid_moves = false;
     let validPawnIds: string[] = [];
@@ -88,43 +87,30 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
     }
 
     // Store the roll in dice_rolls and dice_roll_logs
-    await conn.execute(
-      `INSERT INTO dice_rolls (player_id, current_board_id, dice_value, rolled_at)
-       VALUES (?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE current_board_id = VALUES(current_board_id), dice_value = VALUES(dice_value), rolled_at = NOW()`,
-      [player_id, board_id, dice_value]
-    );
-    
-    await conn.execute(
-      `INSERT INTO dice_roll_logs (board_id, player_id, dice_value, valid_moves, rolled_at)
-       VALUES (?, ?, ?, ?, NOW())`,
-      [board_id, player_id, dice_value, JSON.stringify(valid_moves)]
-    );
+      await tx.diceRoll.upsert({
+        where: { player_id },
+        update: { current_board_id: board_id, dice_value, rolled_at: new Date() },
+        create: { player_id, current_board_id: board_id, dice_value, rolled_at: new Date() }
+      });
+      
+      await tx.diceRollLog.create({
+        data: {
+          board_id,
+          player_id,
+          dice_value,
+          valid_moves: valid_moves as any,
+          rolled_at: new Date()
+        }
+      });
 
-    // Retrieve all players' dice for this board
-    const [allPlayers] = await (conn as PoolConnection).execute<RowDataPacket[]>(
-      `SELECT 
-         p.player_id,
-         u.name,
-         dr.dice_value,
-         dr.rolled_at
-       FROM (
-         SELECT id as board_id, player1 as player_id FROM boards WHERE id = ?
-         UNION ALL
-         SELECT id as board_id, player2 as player_id FROM boards WHERE id = ?
-         UNION ALL
-         SELECT id as board_id, player3 as player_id FROM boards WHERE id = ? AND player3 IS NOT NULL
-         UNION ALL
-         SELECT id as board_id, player4 as player_id FROM boards WHERE id = ? AND player4 IS NOT NULL
-       ) p
-       INNER JOIN users u ON p.player_id = u.id
-       LEFT JOIN dice_rolls dr ON dr.player_id = p.player_id
-       ORDER BY dr.rolled_at DESC`,
-      [board_id, board_id, board_id, board_id]
-    );
-
-    // Commit the transaction
-    await conn.commit();
+      // Retrieve all players' dice for this board
+      const diceRollsList = await tx.diceRoll.findMany({
+        where: { current_board_id: board_id },
+        include: { player: { select: { name: true } } },
+        orderBy: { rolled_at: 'desc' }
+      });
+      allPlayers = diceRollsList;
+    });
 
     // Build base roll result
     const rollResult = {
@@ -134,7 +120,7 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
       isAllPawnsLocked: valid_moves === false, // for client animation timing
       allPlayersDice: allPlayers.map(p => ({
         player_id: p.player_id,
-        playerName: p.name,
+        playerName: p.player.name,
         dice_value: p.dice_value,
         rolled_at: p.rolled_at,
         isDiceRolling: p.player_id === player_id // only rolling player has animation
@@ -193,42 +179,26 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
       console.log(`Auto-clearing dice for ${player_id} (no valid moves)`);
       
       // Clear the roller's dice_value in DB (same as old diceClear)
-      await conn.execute(
-        `INSERT INTO dice_rolls (player_id, current_board_id, dice_value, rolled_at)
-         VALUES (?, ?, NULL, NOW())
-         ON DUPLICATE KEY UPDATE current_board_id = VALUES(current_board_id), dice_value = NULL, rolled_at = NOW()`,
-        [player_id, board_id]
-      );
+      await prisma.diceRoll.upsert({
+        where: { player_id },
+        update: { current_board_id: board_id, dice_value: null, rolled_at: new Date() },
+        create: { player_id, current_board_id: board_id, dice_value: null, rolled_at: new Date() }
+      });
 
       // Get updated dice state after clearing
-      const [updatedPlayers] = await (conn as PoolConnection).execute<RowDataPacket[]>(
-        `SELECT 
-           p.player_id,
-           u.name,
-           dr.dice_value,
-           dr.rolled_at
-         FROM (
-           SELECT id as board_id, player1 as player_id FROM boards WHERE id = ?
-           UNION ALL
-           SELECT id as board_id, player2 as player_id FROM boards WHERE id = ?
-           UNION ALL
-           SELECT id as board_id, player3 as player_id FROM boards WHERE id = ? AND player3 IS NOT NULL
-           UNION ALL
-           SELECT id as board_id, player4 as player_id FROM boards WHERE id = ? AND player4 IS NOT NULL
-         ) p
-         INNER JOIN users u ON p.player_id = u.id
-         LEFT JOIN dice_rolls dr ON dr.player_id = p.player_id
-         ORDER BY dr.rolled_at DESC`,
-        [board_id, board_id, board_id, board_id]
-      );
+      const updatedPlayers = await prisma.diceRoll.findMany({
+        where: { current_board_id: board_id },
+        include: { player: { select: { name: true } } },
+        orderBy: { rolled_at: 'desc' }
+      });
 
       const clearResult = {
         board_id,
         player_id,
         dice_value: null,
-        allPlayersDice: updatedPlayers.map(p => ({
+        allPlayersDice: updatedPlayers.map((p: any) => ({
           player_id: p.player_id,
-          playerName: p.name,
+          playerName: p.player.name,
           dice_value: p.dice_value,
           rolled_at: p.rolled_at
         }))
@@ -243,27 +213,12 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
 
     return;
 
-  } catch (err) {
-    // Rollback transaction
-    try {
-      if (conn) await conn.rollback();
-    } catch (rbErr) {
-      console.error("Rollback failed:", rbErr);
-    }
-
+  } catch (err: any) {
     console.error("Error in rollDice:", err);
     return safeAck({
       ok: false,
       msg: "Failed to roll dice",
-      error: (err as any).message
+      error: err.message
     });
-  } finally {
-    if (conn) {
-      try {
-        conn.release();
-      } catch (releaseErr) {
-        console.error("Error releasing DB connection:", releaseErr);
-      }
-    }
   }
 };

@@ -1,4 +1,4 @@
-import db from "../config/db.js";
+import prisma from "../config/prisma.js";
 import { recomputeTurnStateForBoard } from "./turnState.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
@@ -13,10 +13,15 @@ export const suspendGame = async (io: Server, socket: GameSocket, payload: any, 
 
   try {
     // 1) Delete all pawns to permanently disqualify the player
-    await db.execute(`DELETE FROM pawns WHERE board_id = ? AND player_id = ?`, [board_id, player_id]);
+    await prisma.pawn.deleteMany({
+      where: { board_id, player_id }
+    });
     
     // 2) Wipe their dice roll if they had a pending one
-    await db.execute(`UPDATE dice_rolls SET dice_value = NULL WHERE current_board_id = ? AND player_id = ?`, [board_id, player_id]);
+    await prisma.diceRoll.updateMany({
+      where: { player_id, current_board_id: board_id },
+      data: { dice_value: null }
+    });
 
     // 3) Broadcast leaving visually to other players
     io.to(board_id).emit("playerLeft", {

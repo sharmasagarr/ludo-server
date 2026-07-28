@@ -1,0 +1,203 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id                        String    @id @default(uuid()) @db.VarChar(36)
+  username                  String    @unique @db.VarChar(255)
+  name                      String    @db.VarChar(255)
+  password                  String    @db.VarChar(255)
+  role                      String?   @default("user") @db.VarChar(50)
+  points                    Int?      @default(0)
+  diamonds                  Int?      @default(0)
+  current_dice_roll_balance Int?      @default(20)
+  current_move_balance      Int?      @default(0)
+  kills                     Int?      @default(0)
+  status                    Boolean?  @default(true)
+  is_active                 Boolean?  @default(true)
+  is_deleted                Boolean?  @default(false)
+  created_at                DateTime  @default(now()) @db.DateTime(0)
+  updated_at                DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  boardsAsPlayer1           Board[]   @relation("BoardToPlayer1")
+  boardsAsPlayer2           Board[]   @relation("BoardToPlayer2")
+  boardsAsPlayer3           Board[]   @relation("BoardToPlayer3")
+  boardsAsPlayer4           Board[]   @relation("BoardToPlayer4")
+  boardsAsCreator           Board[]   @relation("BoardToCreator")
+  boardsAsWinner1           Board[]   @relation("BoardToWinner1")
+  boardsAsWinner2           Board[]   @relation("BoardToWinner2")
+  boardsAsWinner3           Board[]   @relation("BoardToWinner3")
+  boardsAsLoser             Board[]   @relation("BoardToLoser")
+
+  pawns                     Pawn[]
+  diceRolls                 DiceRoll?
+  diceRollLogs              DiceRollLog[]
+  moveLogs                  MoveLog[]
+
+  @@map("users")
+}
+
+model Board {
+  id            String    @id @default(uuid()) @db.VarChar(36)
+  player1       String    @db.VarChar(36)
+  player2       String?   @db.VarChar(36)
+  player3       String?   @db.VarChar(36)
+  player4       String?   @db.VarChar(36)
+  creator       String    @db.VarChar(36)
+  creation_mode BoardCreationMode?
+  start_time    DateTime? @default(now()) @db.DateTime(0)
+  end_time      DateTime? @db.DateTime(0)
+  status        BoardStatus?
+  winner1       String?   @db.VarChar(36)
+  winner2       String?   @db.VarChar(36)
+  winner3       String?   @db.VarChar(36)
+  loser         String?   @db.VarChar(36)
+  is_active     Boolean?  @default(true)
+  is_deleted    Boolean?  @default(false)
+  created_at    DateTime  @default(now()) @db.DateTime(0)
+  updated_at    DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  player1User   User      @relation("BoardToPlayer1", fields: [player1], references: [id])
+  player2User   User?     @relation("BoardToPlayer2", fields: [player2], references: [id])
+  player3User   User?     @relation("BoardToPlayer3", fields: [player3], references: [id])
+  player4User   User?     @relation("BoardToPlayer4", fields: [player4], references: [id])
+  creatorUser   User      @relation("BoardToCreator", fields: [creator], references: [id])
+  winner1User   User?     @relation("BoardToWinner1", fields: [winner1], references: [id])
+  winner2User   User?     @relation("BoardToWinner2", fields: [winner2], references: [id])
+  winner3User   User?     @relation("BoardToWinner3", fields: [winner3], references: [id])
+  loserUser     User?     @relation("BoardToLoser", fields: [loser], references: [id])
+
+  pawns         Pawn[]
+  diceRollLogs  DiceRollLog[]
+  moveLogs      MoveLog[]
+
+  @@index([player1], map: "idx_boards_player1")
+  @@index([player2], map: "idx_boards_player2")
+  @@index([player3], map: "idx_boards_player3")
+  @@index([player4], map: "idx_boards_player4")
+  @@index([creator], map: "idx_boards_creator")
+  @@index([winner1], map: "idx_boards_winner1")
+  @@index([winner2], map: "idx_boards_winner2")
+  @@index([winner3], map: "idx_boards_winner3")
+  @@index([loser], map: "idx_boards_loser")
+  @@map("boards")
+}
+
+model Pawn {
+  id               String    @id @default(uuid()) @db.VarChar(36)
+  board_id         String    @db.VarChar(36)
+  player_id        String    @db.VarChar(36)
+  type             PawnType
+  color            PawnColor?
+  current_position String?   @db.VarChar(36)
+  next_position    String?   @db.VarChar(36)
+  is_safe          Boolean?  @default(false)
+  has_heart        Boolean?  @default(false)
+  moves            Int?      @default(0)
+  moves_lost       Int?      @default(0)
+  kills            Int?      @default(0)
+  prev_position    String?   @db.VarChar(36)
+  last_moved_at    DateTime? @db.Timestamp(0)
+  is_active        Boolean?  @default(true)
+  is_deleted       Boolean?  @default(false)
+  created_at       DateTime  @default(now()) @db.DateTime(0)
+  updated_at       DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  board            Board     @relation(fields: [board_id], references: [id])
+  player           User      @relation(fields: [player_id], references: [id])
+
+  @@index([board_id], map: "idx_pawns_board_id")
+  @@index([player_id], map: "idx_pawns_player_id")
+  @@map("pawns")
+}
+
+model DiceRoll {
+  player_id        String    @id @db.VarChar(36)
+  current_board_id String?   @db.VarChar(36)
+  dice_value       Int?
+  rolled_at        DateTime? @default(now()) @db.DateTime(0)
+  is_active        Boolean?  @default(true)
+  is_deleted       Boolean?  @default(false)
+  created_at       DateTime  @default(now()) @db.DateTime(0)
+  updated_at       DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  player           User      @relation(fields: [player_id], references: [id])
+
+  @@map("dice_rolls")
+}
+
+model DiceRollLog {
+  id               Int       @id @default(autoincrement())
+  board_id         String    @db.VarChar(36)
+  player_id        String    @db.VarChar(36)
+  dice_value       Int?
+  valid_moves      Json?
+  rolled_at        DateTime? @default(now()) @db.DateTime(0)
+  is_active        Boolean?  @default(true)
+  is_deleted       Boolean?  @default(false)
+  created_at       DateTime  @default(now()) @db.DateTime(0)
+  updated_at       DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  board            Board     @relation(fields: [board_id], references: [id])
+  player           User      @relation(fields: [player_id], references: [id])
+
+  @@index([board_id], map: "idx_dice_logs_board_id")
+  @@index([player_id], map: "idx_dice_logs_player_id")
+  @@map("dice_roll_logs")
+}
+
+model MoveLog {
+  id                     Int       @id @default(autoincrement())
+  board_id               String    @db.VarChar(36)
+  player_id              String    @db.VarChar(36)
+  pawn_id                String?   @db.VarChar(36)
+  dice_value             Int?
+  from_position          String?   @db.VarChar(36)
+  to_position            String?   @db.VarChar(36)
+  has_captured           Boolean?  @default(false)
+  got_captured           Boolean?  @default(false)
+  captured_pawn_ids      Json?
+  actual_moves           Int?      @default(0)
+  prev_move_balance      Int?      @default(0)
+  at_dice_roll_balance   Int?      @default(0)
+  created_at             DateTime? @default(now()) @db.DateTime(0)
+  is_active              Boolean?  @default(true)
+  is_deleted             Boolean?  @default(false)
+  updated_at             DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  board                  Board     @relation(fields: [board_id], references: [id])
+  player                 User      @relation(fields: [player_id], references: [id])
+
+  @@index([board_id], map: "idx_move_logs_board_id")
+  @@index([player_id], map: "idx_move_logs_player_id")
+  @@map("move_logs")
+}
+
+enum BoardCreationMode {
+  manual
+  system
+}
+
+enum BoardStatus {
+  active
+  suspended
+  finished
+}
+
+enum PawnType {
+  main
+  home
+  base
+  center
+}
+
+enum PawnColor {
+  red
+  blue
+  green
+  yellow
+}
