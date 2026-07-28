@@ -1,14 +1,14 @@
 const AREAS = 4;
 const MAX_ID_PER_AREA = 18;
 
-const homeAreaIdByColor = {
+const homeAreaIdByColor: Record<string, number> = {
   blue: 1,
   red: 2,
   green: 3,
   yellow: 4,
 };
 
-const stepBackward = ({ areaId, cellNum, color }) => {
+const stepBackward = ({ areaId, cellNum, color }: { areaId: number, cellNum: number, color: string }) => {
   let nextId;
   const homeArea = homeAreaIdByColor[color];
   
@@ -27,10 +27,10 @@ const stepBackward = ({ areaId, cellNum, color }) => {
     }
   }
   
-  return { areaId: nextArea, cellNum: nextId };
+  return { areaId: nextArea, cellNum: nextId, color };
 };
 
-export default function handleDangerZoneMove(current_position, pawnColor) {
+export default function handleDangerZoneMove(current_position: string | null | undefined, pawnColor: string) {
   if (!current_position || current_position === "0" || current_position === "finished") {
     return { newPosition: current_position, moves_lost: 0 };
   }

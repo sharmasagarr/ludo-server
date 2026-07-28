@@ -1,7 +1,7 @@
-export default function handleCapture(movedPawn, allPawnsAfterMove){
+export default function handleCapture(movedPawn: any, allPawnsAfterMove: any[]) {
     let has_captured = 0;
-    let occupants = []
-    let captured_pawn_ids = [];
+    let occupants: any[] = [];
+    let captured_pawn_ids: string[] = [];
     let kills = 0;
     const SAFE_IDS = new Set([14, 4]);
     const parts = movedPawn.current_position.split("-");

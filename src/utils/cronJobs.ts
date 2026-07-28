@@ -1,12 +1,13 @@
 import cron from "node-cron";
 import db from "../config/db.js";
 import { formatISTDateTimeForSQL, formatISTDateForSQL, getISTDateTime } from "./istDateTime.js";
+import { RowDataPacket } from "mysql2/promise";
 
 /**
  * Check and finish expired boards based on end_time
  * Runs daily at 12:00 AM IST
  */
-export const checkExpiredBoards = async () => {
+export const checkExpiredBoards = async (): Promise<void> => {
   const connection = await db.getConnection();
   try {
     console.log(`[Cron Job] Checking expired boards at ${formatISTDateTimeForSQL()}`);
@@ -29,7 +30,7 @@ export const checkExpiredBoards = async () => {
     //   2025-11-30 00:00:00 <= 2025-11-30 00:00:00 = TRUE, so it expires
     //
     // end_time is stored in IST, and we compare with current IST datetime
-    const [expiredBoards] = await connection.execute(
+    const [expiredBoards] = await connection.execute<RowDataPacket[]>(
       `SELECT id, player1, player2, player3, player4, winner1, winner2, winner3, loser
        FROM boards
        WHERE end_time IS NOT NULL
@@ -61,7 +62,7 @@ export const checkExpiredBoards = async () => {
         ].filter(Boolean);
 
         // Calculate total moves earned for each player on this board from move_logs
-        const [playerMoves] = await connection.execute(
+        const [playerMoves] = await connection.execute<RowDataPacket[]>(
           `SELECT 
             ml.player_id,
             SUM(CASE WHEN ml.actual_moves > 0 THEN ml.actual_moves ELSE 0 END) AS totalMoves
@@ -179,7 +180,7 @@ export const checkExpiredBoards = async () => {
  * Better approach: Use a timezone-aware scheduling or check the server timezone
  * and adjust the cron expression accordingly.
  */
-export const startExpiredBoardsCron = () => {
+export const startExpiredBoardsCron = (): void => {
   // Detect server timezone offset
   const serverOffset = -new Date().getTimezoneOffset() / 60; // Offset in hours
   const istOffset = 5.5; // IST is UTC+5:30

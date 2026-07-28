@@ -1,22 +1,25 @@
+import type { GameSocket } from "../types/index.js";
 import db from "../config/db.js";
+import { Server } from "socket.io";
+import { RowDataPacket } from "mysql2/promise";
 
-const boardTurnState = {};
-const boardTurnTimers = {};
-let handleTurnTimeout;
+const boardTurnState: Record<string, any> = {};
+const boardTurnTimers: Record<string, any> = {};
+let handleTurnTimeout: any;
 
-export const recomputeTurnStateForBoard = async (io, board_id, shouldBroadcast = true) => {
+export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true) => {
   if (!board_id) return;
 
   // 1) find online players in this board (from sockets)
   const socketsInRoom = await io.in(board_id).fetchSockets();
   const onlineIds = new Set(
   socketsInRoom
-      .map((s) => s.player_id)
+      .map((s) => (s as unknown as GameSocket).player_id)
       .filter(Boolean)
   );
 
   // 2) get dice balance of all players of this board
-  const [rows] = await db.execute(
+  const [rows] = await db.execute<RowDataPacket[]>(
       `
       SELECT u.id AS player_id,
         COALESCE(u.current_dice_roll_balance, 0) AS current_dice_roll_balance
@@ -36,9 +39,9 @@ export const recomputeTurnStateForBoard = async (io, board_id, shouldBroadcast =
       )
       .map((r) => r.player_id);
 
-  let mode;
-  let currentTurnPlayerId;
-  let turnOrder = [];
+  let mode: string;
+  let currentTurnPlayerId: string | null = null;
+  let turnOrder: string[] = [];
 
   const prevState = boardTurnState[board_id];
 
@@ -67,7 +70,7 @@ export const recomputeTurnStateForBoard = async (io, board_id, shouldBroadcast =
 
   if (currentTurnPlayerId) {
     try {
-      const [balRows] = await db.execute(
+      const [balRows] = await db.execute<RowDataPacket[]>(
         `SELECT current_dice_roll_balance FROM users WHERE id = ?`,
         [currentTurnPlayerId]
       );
@@ -114,7 +117,7 @@ export const recomputeTurnStateForBoard = async (io, board_id, shouldBroadcast =
   return boardTurnState[board_id];
 };
 
-handleTurnTimeout = async (io, board_id) => {
+handleTurnTimeout = async (io: Server, board_id: string) => {
   const state = boardTurnState[board_id];
   if (!state || state.mode !== "turn") return;
 
@@ -130,7 +133,7 @@ handleTurnTimeout = async (io, board_id) => {
   // 🛑 0) ANTI-CHEAT: FORCED AUTO-MOVE
   // If the player holds an active dice roll and has valid moves, force them to move!
   try {
-    const [diceRows] = await db.execute(
+    const [diceRows] = await db.execute<RowDataPacket[]>(
       `SELECT dice_value FROM dice_rolls WHERE player_id = ? AND current_board_id = ? AND dice_value IS NOT NULL`,
       [timedOutPlayerId, board_id]
     );
@@ -138,7 +141,7 @@ handleTurnTimeout = async (io, board_id) => {
     if (diceRows.length > 0) {
       const pendingDiceValue = diceRows[0].dice_value;
 
-      const [playerPawns] = await db.execute(
+      const [playerPawns] = await db.execute<RowDataPacket[]>(
         `SELECT id, current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
         [board_id, timedOutPlayerId]
       );
@@ -165,9 +168,9 @@ handleTurnTimeout = async (io, board_id) => {
           id: 'SERVER_AFK_AUTO',
           board_id: board_id, // ensure payload spoof passes validation
           player_id: timedOutPlayerId,
-          to: (room) => io.to(room),
+          to: (room: string) => io.to(room),
           emit: () => {} // stub
-        };
+        } as unknown as GameSocket;
 
         // Suppress errors during auto-move to ensure server continuity
         try {
@@ -188,7 +191,7 @@ handleTurnTimeout = async (io, board_id) => {
     console.error("Failed to process auto-move intercept:", err);
   }
 
-  // 🛑 1) NO VALID MOVES: CLEAR DICE IN DB FOR TIMED OUT PLAYER
+  // 🛑 1) NO VALID MOVES:          // Clear dice row (set to null) instead of deleting
   try {
     await db.execute(
       `INSERT INTO dice_rolls (player_id, current_board_id, dice_value, rolled_at)
@@ -198,7 +201,7 @@ handleTurnTimeout = async (io, board_id) => {
     );
 
     // Fetch refreshed players dice row to broadcast (as seen in rollDice auto-clear)
-    const [updatedPlayers] = await db.execute(
+    const [updatedPlayers] = await db.execute<RowDataPacket[]>(
       `SELECT 
          p.player_id, u.name, dr.dice_value, dr.rolled_at
        FROM (
@@ -216,16 +219,22 @@ handleTurnTimeout = async (io, board_id) => {
       [board_id, board_id, board_id, board_id]
     );
 
+    const sockets = await io.in(board_id).fetchSockets();
+
     io.to(board_id).emit("diceCleared", {
       board_id,
       player_id: timedOutPlayerId,
       dice_value: null,
-      allPlayersDice: updatedPlayers.map(p => ({
-        player_id: p.player_id,
-        playerName: p.name,
-        dice_value: p.dice_value,
-        rolled_at: p.rolled_at
-      }))
+      allPlayersDice: updatedPlayers.map(p => {
+        const s = sockets.find(s => (s as unknown as GameSocket).player_id === p.player_id);
+        return {
+          player_id: p.player_id,
+          socketId: s?.id,
+          playerName: p.name,
+          dice_value: p.dice_value,
+          rolled_at: p.rolled_at
+        };
+      })
     });
   } catch (err) {
     console.error("Failed to clear dice on timeout:", err);
@@ -263,7 +272,7 @@ handleTurnTimeout = async (io, board_id) => {
 };
 
 
-export const canPlayerAct = async (io, board_id, player_id) => {
+export const canPlayerAct = async (io: Server, board_id: string, player_id: string) => {
   if (!board_id || !player_id) {
     return { ok: false, reason: "INVALID_DATA" };
   }
@@ -273,12 +282,13 @@ export const canPlayerAct = async (io, board_id, player_id) => {
   }
   const state = boardTurnState[board_id];
 
-  const [[row]] = await db.execute(
+  const [balanceRows] = await db.execute<RowDataPacket[]>(
     `SELECT COALESCE(current_dice_roll_balance, 0) AS balance
      FROM users
      WHERE id = ?`,
     [player_id]
   );
+  const row = balanceRows[0] as any;
 
   const balance = Number(row?.balance ?? 0);
 
@@ -297,7 +307,7 @@ export const canPlayerAct = async (io, board_id, player_id) => {
   return { ok: true, reason: "TURN_OK" };
 };
 
-export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_value) => {
+export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPlayerId: string, dice_value: number | null) => {
   console.log(`[DEBUG] advanceTurnAfterMove called | player: ${lastPlayerId} | dice_value: ${dice_value} | Number(dice): ${Number(dice_value)}`);
   if (!board_id || !lastPlayerId) return;
 
@@ -332,7 +342,7 @@ export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_valu
       );
       
       // Broadcast updated players (including dice balance) so frontends unlock their UI dice
-      const [updatedPlayers] = await db.execute(
+      const [updatedPlayers] = await db.execute<RowDataPacket[]>(
         `SELECT 
            u.id as player_id,
            u.name as playerName,
@@ -378,7 +388,7 @@ export const advanceTurnAfterMove = async (io, board_id, lastPlayerId, dice_valu
   startTurnTimer(io, board_id);
 };
 
-export const clearTurnTimer = (board_id) => {
+export const clearTurnTimer = (board_id: string) => {
   const existing = boardTurnTimers[board_id];
   if (existing) {
     clearTimeout(existing);
@@ -387,7 +397,7 @@ export const clearTurnTimer = (board_id) => {
 };
 
 // Start (or restart) a 30s timer for the current turn player
-export const startTurnTimer = (io, board_id) => {
+export const startTurnTimer = (io: Server, board_id: string) => {
   clearTurnTimer(board_id);
 
   // 🛑 TEMPORARILY DISABLED FOR TESTING/DEVELOPMENT

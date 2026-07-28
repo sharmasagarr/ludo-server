@@ -1,12 +1,12 @@
 export default function handleFinalPos(
-    current_position,
-    dice_value,
-    color,
-    type
+    current_position: string | null | undefined,
+    dice_value: number,
+    color: string,
+    type: string
 ) {
-  let finalPosition;
-  let finalType;
-  let finalCellNum;
+  let finalPosition: string | undefined;
+  let finalType: string | undefined;
+  let finalCellNum: number | null | undefined;
   let is_safe = 0;
   let moves = 0;
 
@@ -14,7 +14,7 @@ export default function handleFinalPos(
   const MAX_ID_PER_AREA = 18;
   const SAFE_IDS = new Set([14, 4]);
 
-  const homeAreaIdByColor = {
+  const homeAreaIdByColor: Record<string, number> = {
     blue: 1,
     red: 2,
     green: 3,
@@ -24,7 +24,7 @@ export default function handleFinalPos(
   const startPosition = `cell-area-${homeAreaIdByColor[color]}-id-14`;
 
   // ===== helper to build position string =====
-  const toCell = ({ areaId, cellNum }) => {
+  const toCell = ({ areaId, cellNum }: { areaId: number | null, cellNum: number | null }) => {
     if (cellNum === null || areaId === null) return "finished";
     return `cell-area-${areaId}-id-${cellNum}`;
   };
@@ -44,7 +44,7 @@ export default function handleFinalPos(
     cellNum = Number.parseInt(parts[4], 10);
   }
 
-  const stepForward = ({ areaId, cellNum }) => {
+  const stepForward = ({ areaId, cellNum }: { areaId: number | null, cellNum: number | null }) => {
     if (areaId == null || cellNum == null) {
       return { areaId: null, cellNum: null };
     }
@@ -135,12 +135,14 @@ export default function handleFinalPos(
     moves = dice_value;
     finalCellNum = pos.cellNum;
 
-    if (pos.cellNum >= 8 && pos.cellNum <= 12) {
+    const cellNumNum = pos.cellNum as number;
+
+    if (cellNumNum >= 8 && cellNumNum <= 12) {
       finalType = "home";
       is_safe = 1;
     } else {
       finalType = "main";
-      is_safe = SAFE_IDS.has(pos.cellNum) ? 1 : 0;
+      is_safe = SAFE_IDS.has(cellNumNum) ? 1 : 0;
     }
     
     return { 

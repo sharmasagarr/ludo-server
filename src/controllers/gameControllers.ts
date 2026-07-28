@@ -1,11 +1,14 @@
 import db from "../config/db.js";
 import { v7 as uuidv7 } from "uuid";
+import { Response } from "express";
+import { AuthRequest } from "../types/index.js";
+import { RowDataPacket } from "mysql2/promise";
 
 // Default colors for joining players (Blue first, opposite is Green, then Red, Yellow)
 const PLAYER_COLORS = ["blue", "green", "red", "yellow"];
 
 // Initialize 4 pawns for a player entering the game
-const initializePawns = async (board_id, player_id, color) => {
+const initializePawns = async (board_id: string, player_id: string, color: string): Promise<void> => {
   const pawnValues = Array.from({ length: 4 }).map(() => [
     uuidv7(),
     board_id,
@@ -23,11 +26,12 @@ const initializePawns = async (board_id, player_id, color) => {
   );
 };
 
-export const createGame = async (req, res) => {
+export const createGame = async (req: AuthRequest, res: Response): Promise<void> => {
   // Use authenticated user ID instead of accepting untrusted username from body
-  const player_id = req.user.id;
+  const player_id = req.user?.id;
   if (!player_id) {
-    return res.status(400).json({ message: "User not authenticated." });
+    res.status(400).json({ message: "User not authenticated." });
+    return;
   }
 
   try {
@@ -47,35 +51,39 @@ export const createGame = async (req, res) => {
       message: "Game created successfully",
       board_id,
     });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error creating game:", error);
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(500).json({ success: false, message: "Server error", error: error instanceof Error ? error.message : String(error) });
   }
 };
 
-export const joinGame = async (req, res) => {
+export const joinGame = async (req: AuthRequest, res: Response): Promise<void> => {
   const { board_id } = req.body;
-  const player_id = req.user.id;
+  const player_id = req.user?.id;
   
   if (!player_id || !board_id) {
-    return res.status(400).json({ message: "Authenticated user and board_id are required" });
+    res.status(400).json({ message: "Authenticated user and board_id are required" });
+    return;
   }
 
   try {
-    const [boards] = await db.query(`SELECT * FROM boards WHERE id = ?`, [board_id]);
+    const [boards] = await db.query<RowDataPacket[]>(`SELECT * FROM boards WHERE id = ?`, [board_id]);
     if (boards.length === 0) {
-      return res.status(404).json({ success: false, message: "Board not found" });
+      res.status(404).json({ success: false, message: "Board not found" });
+      return;
     }
 
     const board = boards[0];
 
     if (board.status !== 'active') {
-       return res.status(400).json({ success: false, message: "Game is not active" });
+       res.status(400).json({ success: false, message: "Game is not active" });
+       return;
     }
 
     // Check if player is already in the game
     if (board.player1 === player_id || board.player2 === player_id || board.player3 === player_id || board.player4 === player_id) {
-      return res.status(200).json({ success: true, message: "Already joined", board_id });
+      res.status(200).json({ success: true, message: "Already joined", board_id });
+      return;
     }
 
     // Find first available slot
@@ -86,7 +94,8 @@ export const joinGame = async (req, res) => {
     else if (!board.player4) { slotToFill = 'player4'; colorIndex = 3; }
 
     if (!slotToFill) {
-      return res.status(400).json({ success: false, message: "Game is already full (4 players max)" });
+      res.status(400).json({ success: false, message: "Game is already full (4 players max)" });
+      return;
     }
 
     await db.query(`UPDATE boards SET ${slotToFill} = ? WHERE id = ?`, [player_id, board_id]);
@@ -98,8 +107,8 @@ export const joinGame = async (req, res) => {
       board_id
     });
     
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error joining game:", error);
-    res.status(500).json({ success: false, message: "Server error", error: error.message });
+    res.status(500).json({ success: false, message: "Server error", error: error instanceof Error ? error.message : String(error) });
   }
 };

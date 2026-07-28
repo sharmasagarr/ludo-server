@@ -1,10 +1,12 @@
 import db from "../config/db.js";
 import handleDangerZoneMove from "../utils/handleDangerZoneMove.js";
+import { Server } from "socket.io";
+import { GameSocket } from "../types/index.js";
+import { RowDataPacket, PoolConnection } from "mysql2/promise";
 
-
-export const dangerZonePawnMove = async (io, socket, payload, ack) => {
-  const safeAck = (x) => { try { ack?.(x); } catch {} };
-  let conn = null;
+export const dangerZonePawnMove = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
+  const safeAck = (x: any) => { try { ack?.(x); } catch {} };
+  let conn: PoolConnection | null = null;
 
 
   try {
@@ -22,7 +24,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
     try {
       conn = await db.getConnection();
-    } catch (connErr) {
+    } catch (connErr: any) {
       console.error("DB connection error:", connErr);
       return safeAck({
         ok: false,
@@ -37,10 +39,11 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       // 1) Load pawn + its FLM
-      const [[pawnRow]] = await conn.execute(
+      const [pawnRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
         `SELECT * FROM pawns WHERE id = ? AND board_id = ?`,
         [pawn_id, board_id]
       );
+      const pawnRow = pawnRows[0] as any;
 
 
       if (!pawnRow) {
@@ -55,12 +58,13 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
       }
 
 
-      const [[flmBeforeMove]] = await conn.execute(
+      const [flmBeforeMoveRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
         `SELECT current_dice_roll_balance, current_move_balance, kills, id
            FROM users
           WHERE id = ?`,
         [player_id]
       );
+      const flmBeforeMove = flmBeforeMoveRows[0] as any;
 
 
       if (!flmBeforeMove) {
@@ -97,7 +101,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       // 3) Update pawn going backwards
-      await conn.execute(
+      await (conn as PoolConnection).execute(
         `UPDATE pawns 
            SET prev_position = ?,
                current_position = ?,
@@ -116,7 +120,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       // 4) Update FLM of the player who lost moves
-      await conn.execute(
+      await (conn as PoolConnection).execute(
         `UPDATE users
             SET current_move_balance = GREATEST(current_move_balance - ?, 0)
           WHERE id = ?`,
@@ -125,7 +129,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       // 5) Re-fetch pawns AFTER backward move to check for collision
-      const [pawnsAfterMove] = await conn.execute(
+      const [pawnsAfterMove] = await (conn as PoolConnection).execute<RowDataPacket[]>(
         `SELECT * FROM pawns WHERE board_id = ?`,
         [board_id]
       );
@@ -133,17 +137,17 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
       // ===== CAPTURE LOGIC FOR DANGER-ZONE BACKWARD MOVE =====
       let has_captured = false;
-      let captured_pawn_ids = [];
+      let captured_pawn_ids: string[] = [];
       let kills = 0;
-      let captureLogs = [];
+      let captureLogs: any[] = [];
 
 
       // Find any pawn already on that cell, different color/player, not base/center
       const capturerPawn = pawnsAfterMove.find(
-        (p) =>
-          p.current_position === backwardPawn.current_position &&
+        (p: any) =>
+          p.current_position === backwardPawn?.current_position &&
           p.id !== pawn_id &&
-          p.player_id !== backwardPawn.player_id && // opponent
+          p.player_id !== backwardPawn?.player_id && // opponent
           p.type !== "base" &&
           p.type !== "center" &&
           Number(p.is_safe) !== 1
@@ -160,18 +164,19 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
         //  - backwardPawn = pawn that moved back and gets captured
 
 
-        const capturedPawn = backwardPawn;
+        const capturedPawn = backwardPawn as any;
         const capturedPlayerId = capturedPawn.player_id;
         const capturedFromPos = String(capturedPawn.current_position ?? "0");
 
 
         // get FLM rows of capturer and captured
-        const [[capturedFlmBefore]] = await conn.execute(
+        const [capturedFlmBeforeRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
           `SELECT current_dice_roll_balance, current_move_balance
              FROM users
             WHERE id = ?`,
           [capturedPlayerId]
         );
+        const capturedFlmBefore = capturedFlmBeforeRows[0] as any;
 
 
         has_captured = true;
@@ -184,7 +189,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
           // a) reset captured pawn to base
-          const [capturedPawnUpdateResult] = await conn.execute(
+          const [capturedPawnUpdateResult] = await (conn as PoolConnection).execute<any>(
             `UPDATE pawns
                 SET type = 'base',
                     prev_position = ?,
@@ -199,16 +204,16 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
           // b) capturer pawn gains those moves
-          const [capturerPawnUpdateResult] = await conn.execute(
+          const [capturerPawnUpdateResult] = await (conn as PoolConnection).execute<any>(
             `UPDATE pawns
                 SET moves = moves + ?
               WHERE id = ?`,
-            [capturedPawn.moves, capturerPawn.id]
+            [capturedPawn.moves, (capturerPawn as any).id]
           );
 
 
           // c) captured FLM loses move balance
-          const [capturedFlmUpdateResult] = await conn.execute(
+          const [capturedFlmUpdateResult] = await (conn as PoolConnection).execute<any>(
             `UPDATE users
                 SET current_move_balance = GREATEST(current_move_balance - ?, 0)
               WHERE id = ?`,
@@ -217,13 +222,13 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
           // d) capturer FLM gains moves + move balance + kills + dice bonus
-          const [capturerFlmUpdateResult] = await conn.execute(
+          const [capturerFlmUpdateResult] = await (conn as PoolConnection).execute<any>(
             `UPDATE users
                 SET current_move_balance = current_move_balance + ?,
                     kills = kills + ?,
                     current_dice_roll_balance = current_dice_roll_balance + 1
               WHERE id = ?`,
-            [capturedPawn.moves, kills, capturerPawn.player_id]
+            [capturedPawn.moves, kills, (capturerPawn as any).player_id]
           );
 
 
@@ -258,18 +263,19 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
           // 🔥 NEW: Auto-unlock logic for captured player in danger zone
           // Check if all their pawns are now in base (no main pawns)
-          const [[capturedPlayerStatus]] = await conn.execute(
+          const [capturedPlayerStatusRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
             `SELECT 
               NOT EXISTS (SELECT 1 FROM pawns WHERE player_id = ? AND board_id = ? AND type = 'main') as noMainPawns,
               EXISTS (SELECT 1 FROM pawns WHERE player_id = ? AND board_id = ? AND type = 'base') as hasBasePawns
             `,
             [capturedPlayerId, board_id, capturedPlayerId, board_id]
           );
+          const capturedPlayerStatus = capturedPlayerStatusRows[0] as any;
 
           // If captured player has no main pawns AND has base pawns, unlock one
           if (capturedPlayerStatus.noMainPawns === 1 && capturedPlayerStatus.hasBasePawns === 1) {
             // Get the start position for this captured player's color
-            const homeAreaIdByColor = {
+            const homeAreaIdByColor: Record<string, number> = {
               blue: 1,
               red: 2,
               green: 3,
@@ -277,7 +283,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
             };
             const capturedPlayerStartPosition = `cell-area-${homeAreaIdByColor[capturedPawn.color]}-id-14`;
 
-            const [unlockedResult] = await conn.execute(
+            const [unlockedResult] = await (conn as PoolConnection).execute<any>(
               `UPDATE pawns 
               SET type = 'main', prev_position = '0', current_position = ?, last_moved_at = NOW()
               WHERE player_id = ? AND board_id = ? AND type = 'base'
@@ -287,12 +293,13 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
             if (unlockedResult.affectedRows > 0) {
               // Get the unlocked pawn to add to changedPawnIds
-              const [[unlockedPawn]] = await conn.execute(
+              const [unlockedPawnRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
                 `SELECT id FROM pawns 
                 WHERE player_id = ? AND board_id = ? AND type = 'main' AND current_position = ?
                 ORDER BY last_moved_at DESC LIMIT 1`,
                 [capturedPlayerId, board_id, capturedPlayerStartPosition]
               );
+              const unlockedPawn = unlockedPawnRows[0] as any;
               
               if (unlockedPawn?.id) {
                 changedPawnIds.add(unlockedPawn.id);
@@ -302,7 +309,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
           }
         } else {
           // 🟨 Pawn had a heart → only remove heart, keep it in place
-          const [capturedPawnUpdateResult] = await conn.execute(
+          const [capturedPawnUpdateResult] = await (conn as PoolConnection).execute<any>(
             `UPDATE pawns
                 SET has_heart = 0
               WHERE id = ?`,
@@ -322,11 +329,11 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
         // f) update kills for capturer pawn
-        const [pawnKillUpdate] = await conn.execute(
+        const [pawnKillUpdate] = await (conn as PoolConnection).execute<any>(
           `UPDATE pawns
               SET kills = kills + ?
             WHERE id = ?`,
-          [kills, capturerPawn.id]
+          [kills, (capturerPawn as any).id]
         );
 
 
@@ -337,7 +344,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
         }
 
         // Add capturer pawn to changed pawns
-        changedPawnIds.add(capturerPawn.id);
+        changedPawnIds.add((capturerPawn as any).id);
         
         // Track affected players for captured pawns
         affectedPlayerIds.add(capturedPlayerId);
@@ -371,7 +378,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
         const placeholders = logRows
           .map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
           .join(", ");
-        await conn.execute(
+        await (conn as PoolConnection).execute(
           `INSERT INTO move_logs
              (board_id, player_id, pawn_id, dice_value, from_position, to_position, has_captured, got_captured, captured_pawn_ids, actual_moves, prev_move_balance, at_dice_roll_balance)
            VALUES ${placeholders}`,
@@ -387,12 +394,12 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
       // changedPawnIds already includes: pawn_id, captured_pawn_ids, capturerPawn.id, and any unlocked pawn
 
 
-      let updatedPawns = [];
+      let updatedPawns: any[] = [];
       if (changedPawnIds.size > 0) {
         const pawnPlaceholders = Array.from(changedPawnIds)
           .map(() => "?")
           .join(", ");
-        const [pawnsRows] = await conn.execute(
+        const [pawnsRows] = await (conn as PoolConnection).execute<RowDataPacket[]>(
           `SELECT 
               id, board_id, player_id, type, color, moves, moves_lost, prev_position, current_position, 
               is_safe, kills, has_heart
@@ -420,12 +427,12 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
       // Fetch updated FLM data for all affected players
-      let updatedPlayers = [];
+      let updatedPlayers: any[] = [];
       if (affectedPlayerIds.size > 0) {
         const playerPlaceholders = Array.from(affectedPlayerIds)
           .map(() => "?")
           .join(", ");
-        const [flmRows] = await db.execute(
+        const [flmRows] = await db.execute<RowDataPacket[]>(
           `
           SELECT
             u.id AS player_id,
@@ -481,14 +488,14 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
 
         // We'll also need board winners to compute winPosition for these players
-        const [boardRows] = await db.execute(
+        const [boardRows] = await db.execute<RowDataPacket[]>(
           `SELECT winner1, winner2, winner3, loser FROM boards WHERE id = ?`,
           [board_id]
         );
         const board = boardRows[0] ?? {};
 
 
-        const getWinPosition = (pid) => {
+        const getWinPosition = (pid: string) => {
           if (board.winner1 === pid) return 1;
           if (board.winner2 === pid) return 2;
           if (board.winner3 === pid) return 3;
@@ -497,7 +504,7 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
         };
 
 
-        const getRank = (player_id, players) => {
+        const getRank = (player_id: string, players: any[]) => {
           // players: array of objects -> { player_id, moves }
 
 
@@ -555,10 +562,10 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
 
       io.to(board_id).emit("pawnMoved", delta);
       return safeAck({ ok: true, msg: "Danger move + capture handled", ...delta });
-    } catch (txErr) {
+    } catch (txErr: any) {
       console.error("Danger-zone tx error:", txErr);
       try {
-        await conn.rollback();
+        await (conn as any).rollback();
       } catch (rbErr) {
         console.error("Rollback failed:", rbErr);
       }
@@ -570,11 +577,11 @@ export const dangerZonePawnMove = async (io, socket, payload, ack) => {
     } finally {
       if (conn) {
         try {
-          conn.release();
+          (conn as any).release();
         } catch {}
       }
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error("Fatal error in handleDangerZonePawnMove:", err);
     return safeAck({
       ok: false,

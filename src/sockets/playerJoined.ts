@@ -1,14 +1,17 @@
 import db from "../config/db.js";
 import { recomputeTurnStateForBoard } from "./turnState.js"; 
+import { Server } from "socket.io";
+import { GameSocket } from "../types/index.js";
+import { RowDataPacket, PoolConnection } from "mysql2/promise";
 
-export const playerJoined = async (io, socket, payload, ack) => {
-  const safeAck = (x) => {
+export const playerJoined = async (io: Server, socket: GameSocket, payload: any, ack?: any) => {
+  const safeAck = (x: any) => {
     try {
       ack?.(x);
     } catch {}
   };
 
-  let connection = null;
+  let connection: PoolConnection | null = null;
 
   try {
     connection = await db.getConnection();
@@ -25,7 +28,7 @@ export const playerJoined = async (io, socket, payload, ack) => {
     }
 
     // ---- fetch active board for this player ----
-    const [boardRows] = await connection.execute(
+    const [boardRows] = await connection.execute<RowDataPacket[]>(
       `SELECT * FROM boards 
        WHERE status = 'active'
          AND (player1 = ? OR player2 = ? OR player3 = ? OR player4 = ?)
@@ -52,16 +55,16 @@ export const playerJoined = async (io, socket, payload, ack) => {
     ].filter((pid) => pid && pid !== "");
 
     // ---- fetch pawns for this board ----
-    const [pawns] = await connection.execute(
+    const [pawns] = await (connection as PoolConnection).execute<RowDataPacket[]>(
       `SELECT * FROM pawns WHERE board_id = ? ORDER BY player_id, id`,
       [board.id]
     );
 
     // ---- fetch players aggregation ----
-    let players = [];
+    let players: any[] = [];
 
     if (playerIds.length > 0) {
-      const [playersRows] = await connection.execute(
+      const [playersRows] = await connection.execute<RowDataPacket[]>(
         `SELECT
           u.id AS player_id,
           u.name AS playerName,
@@ -108,8 +111,8 @@ export const playerJoined = async (io, socket, payload, ack) => {
     }
 
     // ---- fetch dice values for this board ----
-    let dice_value = [];
-    [dice_value] = await connection.execute(
+    let dice_value: RowDataPacket[] = [];
+    const [diceRows] = await (connection as PoolConnection).execute<RowDataPacket[]>(
       `SELECT
         p.player_id,
         u.name,
@@ -130,9 +133,10 @@ export const playerJoined = async (io, socket, payload, ack) => {
       ORDER BY dr.rolled_at DESC`,
       [board.id, board.id, board.id, board.id]
     );
+    dice_value = diceRows;
 
     // ---- helper functions ----
-    const getWinPosition = (pid) => {
+    const getWinPosition = (pid: string) => {
       if (board.winner1 === pid) return 1;
       if (board.winner2 === pid) return 2;
       if (board.winner3 === pid) return 3;
@@ -140,7 +144,7 @@ export const playerJoined = async (io, socket, payload, ack) => {
       return null; // Game still in progress
     };
 
-    const getRank = (pid, playersArr) => {
+    const getRank = (pid: string, playersArr: any[]) => {
       const sorted = [...playersArr].sort((a, b) => b.moves - a.moves);
       const index = sorted.findIndex((p) => p.player_id === pid);
       return index === -1 ? null : index + 1;
@@ -151,9 +155,9 @@ export const playerJoined = async (io, socket, payload, ack) => {
     // Get list of currently connected players BEFORE this join
     const socketsInRoom = await io.in(board_id).fetchSockets();
     const onlinePlayers = socketsInRoom.map((s) => ({
-      player_id: s.player_id,
+      player_id: (s as unknown as GameSocket).player_id,
       socketId: s.id,
-      joinedAt: s.joinedAt || null,
+      joinedAt: (s as unknown as GameSocket).joinedAt || null,
     }));
 
     console.log(
@@ -162,9 +166,9 @@ export const playerJoined = async (io, socket, payload, ack) => {
 
     // Join the socket to the board room
     await socket.join(board_id);
-    socket.board_id = board_id;
-    socket.player_id = player_id;
-    socket.joinedAt = new Date().toISOString();
+    (socket as any).board_id = board_id;
+    (socket as any).player_id = player_id;
+    (socket as any).joinedAt = new Date().toISOString();
 
     console.log(
       `Player ${player_id} joined board ${board_id} with socket ${socket.id}`
@@ -182,10 +186,10 @@ export const playerJoined = async (io, socket, payload, ack) => {
     socket.to(board_id).emit("playerJoined", {
       board_id,
       player_id,
-      playerName: players.find((player) => player.player_id === player_id).playerName, 
+      playerName: players.find((player: any) => player.player_id === player_id)?.playerName || "Unknown", 
       turnState,
       socketId: socket.id,
-      joinedAt: socket.joinedAt,
+      joinedAt: (socket as any).joinedAt,
       message: `Player ${player_id} has joined the game`,
       totalPlayers: roomSize,
     });
@@ -210,7 +214,7 @@ export const playerJoined = async (io, socket, payload, ack) => {
       turnState,
       data: {
         board_id: board.id,
-        players: players.map((r) => ({
+        players: players.map((r: any) => ({
           player_id: r.player_id,
           playerName: r.playerName,
           kills: Number(r.kills ?? 0),
@@ -228,7 +232,7 @@ export const playerJoined = async (io, socket, payload, ack) => {
         pawns,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error in playerJoined:", error);
     return safeAck({
       ok: false,

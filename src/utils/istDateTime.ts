@@ -21,7 +21,7 @@ export const getISTDateTime = () => {
  * @param {Date|null} date - Optional date object, defaults to current IST time
  * @returns {string} Formatted datetime string in IST
  */
-export const formatISTDateTimeForSQL = (date = null) => {
+export const formatISTDateTimeForSQL = (date: Date | null = null) => {
   const istDate = date || getISTDateTime();
   // Use UTC methods because we've already converted to IST
   const year = istDate.getUTCFullYear();
@@ -39,7 +39,7 @@ export const formatISTDateTimeForSQL = (date = null) => {
  * @param {Date|null} date - Optional date object, defaults to current IST time
  * @returns {string} Formatted date string in IST
  */
-export const formatISTDateForSQL = (date = null) => {
+export const formatISTDateForSQL = (date: Date | null = null) => {
   const istDate = date || getISTDateTime();
   // Use UTC methods because we've already converted to IST
   const year = istDate.getUTCFullYear();
@@ -54,7 +54,7 @@ export const formatISTDateForSQL = (date = null) => {
  * @param {Date|null} date - Optional date object, defaults to current IST time
  * @returns {string} Formatted time string in IST
  */
-export const formatISTTimeForSQL = (date = null) => {
+export const formatISTTimeForSQL = (date: Date | null = null) => {
   const istDate = date || getISTDateTime();
   // Use UTC methods because we've already converted to IST
   const hours = String(istDate.getUTCHours()).padStart(2, "0");

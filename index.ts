@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import db from "./src/config/db.js";
-import express from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import { createServer } from "node:http";
 import { Server } from "socket.io";
@@ -9,6 +9,7 @@ import gameRoutes from "./src/routes/gameRoutes.js";
 import gameSocket from "./src/sockets/gameSocket.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { RowDataPacket } from "mysql2/promise";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,12 +29,12 @@ gameSocket(io);
 
 const PORT = process.env.PORT || 4500;
 
-app.get("/", (_req, res) => {
+app.get("/", (_req: Request, res: Response) => {
   res.send("Ludo-Backend is running...");
 });
 
 // Configure body parsing - skip for multipart/form-data (handled by multer)
-app.use((req, res, next) => {
+app.use((req: Request, res: Response, next: NextFunction) => {
   const contentType = req.headers["content-type"] || "";
   if (contentType.includes("multipart/form-data")) {
     // Skip body parsing for multipart - let multer handle it
@@ -53,14 +54,15 @@ app.use("/api/game", gameRoutes);
 
 try {
   // Just test once
-  const [rows] = await db.execute("SELECT NOW() AS currentTime");
+  const [rows] = await db.execute<RowDataPacket[]>("SELECT NOW() AS currentTime");
   console.info("✅ MySQL connected | ⏰ DB Time:", rows[0].currentTime);
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(Number(PORT), "0.0.0.0", () => {
     console.info(`🚀 Server running at http://localhost:${PORT}`);
   });
-} catch (err) {
-  console.error("❌ MYSQL DB connection error:", err.message);
+} catch (err: unknown) {
+  const errorMsg = err instanceof Error ? err.message : String(err);
+  console.error("❌ MYSQL DB connection error:", errorMsg);
   process.exit(1);
 }
  

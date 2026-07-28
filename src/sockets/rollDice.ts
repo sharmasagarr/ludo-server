@@ -1,11 +1,14 @@
 import db from "../config/db.js";
 import { canPlayerAct, recomputeTurnStateForBoard, advanceTurnAfterMove, startTurnTimer } from "./turnState.js"; 
 import handleFinalPos from "../utils/handleFinalPos.js";
+import { Server } from "socket.io";
+import { GameSocket } from "../types/index.js";
+import { RowDataPacket, PoolConnection } from "mysql2/promise";
 
-export const rollDice = async (io, socket, payload, ack) => {
-  const safeAck = (x) => { try { ack?.(x); } catch {} };
+export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
+  const safeAck = (x: any) => { try { ack?.(x); } catch {} };
 
-  let conn = null;
+  let conn: PoolConnection | null = null;
   try {
     const { board_id, player_id } = payload ?? {};
 
@@ -38,7 +41,7 @@ export const rollDice = async (io, socket, payload, ack) => {
     }
 
     // 🔒 PENDING DICE CHECK: Prevent re-rolling if they already have an unspent dice value
-    const [existingRolls] = await db.execute(
+    const [existingRolls] = await db.execute<RowDataPacket[]>(
       `SELECT dice_value FROM dice_rolls WHERE player_id = ? AND dice_value IS NOT NULL`,
       [player_id]
     );
@@ -68,13 +71,13 @@ export const rollDice = async (io, socket, payload, ack) => {
     }
 
     // Determine valid_moves completely on the backend
-    const [playerPawns] = await conn.execute(
-      `SELECT current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
+    const [playerPawns] = await (conn as PoolConnection).execute<RowDataPacket[]>(
+      `SELECT id, current_position, color, type FROM pawns WHERE board_id = ? AND player_id = ?`,
       [board_id, player_id]
     );
 
     let valid_moves = false;
-    let validPawnIds = [];
+    let validPawnIds: string[] = [];
     for (const pawn of playerPawns) {
       if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
       const moveResult = handleFinalPos(pawn.current_position, dice_value, pawn.color, pawn.type);
@@ -99,7 +102,7 @@ export const rollDice = async (io, socket, payload, ack) => {
     );
 
     // Retrieve all players' dice for this board
-    const [allPlayers] = await conn.execute(
+    const [allPlayers] = await (conn as PoolConnection).execute<RowDataPacket[]>(
       `SELECT 
          p.player_id,
          u.name,
@@ -169,9 +172,9 @@ export const rollDice = async (io, socket, payload, ack) => {
               id: 'SERVER_SINGLE_PAWN_AUTO',
               board_id: board_id,
               player_id: player_id,
-              to: (room) => io.to(room),
+              to: (room: string) => io.to(room),
               emit: () => {} 
-            };
+            } as unknown as GameSocket;
             
             await movePawn(io, mockSocket, {
               board_id,
@@ -198,7 +201,7 @@ export const rollDice = async (io, socket, payload, ack) => {
       );
 
       // Get updated dice state after clearing
-      const [updatedPlayers] = await conn.execute(
+      const [updatedPlayers] = await (conn as PoolConnection).execute<RowDataPacket[]>(
         `SELECT 
            p.player_id,
            u.name,
@@ -252,7 +255,7 @@ export const rollDice = async (io, socket, payload, ack) => {
     return safeAck({
       ok: false,
       msg: "Failed to roll dice",
-      error: err.message
+      error: (err as any).message
     });
   } finally {
     if (conn) {
