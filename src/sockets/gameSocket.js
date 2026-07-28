@@ -3,6 +3,7 @@ import { rollDice } from "./rollDice.js";
 import { movePawn } from "./movePawn.js";
 import { recomputeTurnStateForBoard } from "./turnState.js";
 import { givePawnHeart } from "./givePawnHeart.js";
+import { suspendGame } from "./suspendGame.js";
 import jwt from "jsonwebtoken";
 
 export default function gameSocket (io) {
@@ -47,6 +48,11 @@ export default function gameSocket (io) {
     socket.on("givePawnHeart", (payload, ack) => {
         payload.player_id = socket.user.id;
         givePawnHeart(io, socket, payload, ack);
+    });
+
+    socket.on("suspendGame", (payload, ack) => {
+        payload.player_id = socket.user.id;
+        suspendGame(io, socket, payload, ack);
     });
 
     // Handle disconnection
