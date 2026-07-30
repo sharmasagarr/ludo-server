@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { Prisma, Pawn } from "@prisma/client";
 import handleFinalPos from "../utils/handleFinalPos.js";
 import handleCapture from "../utils/handleCapture.js";
 import { canPlayerAct, advanceTurnAfterMove } from "./turnState.js"; 
@@ -6,8 +7,13 @@ import { dangerZonePawnMove, buildPlayerStatsPayload } from "./dangerZonePawnMov
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
-export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
-  const safeAck = (x: any) => { try { ack?.(x); } catch {} };
+export const movePawn = async (
+  io: Server,
+  socket: GameSocket,
+  payload: { board_id: string; pawn_id: string; player_id: string; [key: string]: unknown },
+  ack: (response?: unknown) => void
+) => {
+  const safeAck = (x: unknown) => { try { ack?.(x); } catch {} };
 
   try {
     const { board_id, pawn_id, player_id } = payload ?? {};
@@ -21,7 +27,7 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
       return safeAck({ ok: false, msg: "Not your turn" });
     }
 
-    const result = await prisma.$transaction(async (tx: any) => {
+    const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // BACKEND DICE SECURITY CHECK 
       const diceRoll = await tx.diceRoll.findUnique({ where: { player_id } });
       const dice_value = diceRoll?.dice_value;
@@ -33,11 +39,11 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
       if (!userBeforeMove) throw new Error("User not found");
 
       const allPawnsBeforeMove = await tx.pawn.findMany({ where: { board_id } });
-      const movingPawn = allPawnsBeforeMove.find((p: any) => p.id === pawn_id);
+      const movingPawn = allPawnsBeforeMove.find((p: Pawn) => p.id === pawn_id);
       if (!movingPawn) throw new Error(`Pawn not found: ${pawn_id}`);
       if (movingPawn.player_id !== player_id) throw new Error("Unauthorized pawn move");
 
-      const moveResult = handleFinalPos(movingPawn.current_position, dice_value, movingPawn.color, movingPawn.type);
+      const moveResult = handleFinalPos(movingPawn.current_position, dice_value, movingPawn.color as string, movingPawn.type as string);
       if (!moveResult || moveResult.error) {
         throw new Error(`Invalid move: ${moveResult?.message || "Unknown error"}`);
       }
@@ -53,10 +59,10 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
       await tx.pawn.update({
         where: { id: pawn_id },
         data: {
-          type: finalType,
+          type: finalType as import("@prisma/client").PawnType,
           prev_position: String(movingPawn.current_position || ""),
           current_position: String(finalPosition || ""),
-          is_safe: is_safe ? 1 : 0,
+          is_safe: is_safe ? true : false,
           moves: { increment: moves },
           last_moved_at: new Date()
         }
@@ -97,8 +103,8 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
             }
 
             const boardAfter = await tx.board.findUnique({ where: { id: board_id } });
-            if (boardAfter.winner3 && !boardAfter.loser) {
-              const allPlayers = [boardAfter.player1, boardAfter.player2, boardAfter.player3, boardAfter.player4].filter(Boolean);
+            if (boardAfter && boardAfter.winner3 && !boardAfter.loser) {
+              const allPlayers = [boardAfter.player1, boardAfter.player2, boardAfter.player3, boardAfter.player4].filter((p): p is string => Boolean(p));
               const winners = [boardAfter.winner1, boardAfter.winner2, boardAfter.winner3];
               const remainingPlayer = allPlayers.find((p: string) => !winners.includes(p));
               if (remainingPlayer) {
@@ -125,12 +131,13 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
       });
 
       const allPawnsAfterMove = await tx.pawn.findMany({ where: { board_id } });
-      const movedPawnCheck = allPawnsAfterMove.find((p: any) => p.id === pawn_id);
+      const movedPawnCheck = allPawnsAfterMove.find((p: Pawn) => p.id === pawn_id);
+      if (!movedPawnCheck) throw new Error("Pawn not found after move");
       
       const captureResult = handleCapture(movedPawnCheck, allPawnsAfterMove);
       const { has_captured, captured_pawn_ids, kills } = captureResult;
 
-      let captureLogs: any[] = [];
+      let captureLogs: Prisma.MoveLogCreateManyInput[] = [];
       
       // 4) Captures handling
       if (has_captured && Array.isArray(captured_pawn_ids) && captured_pawn_ids.length > 0) {
@@ -152,7 +159,7 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
           
           const capturedFlmBefore = await tx.user.findUnique({ where: { id: row.player_id } });
 
-          if (row.has_heart !== 1 || (row.has_heart === 1 && movedPawnCheck.has_heart === 1)) {
+          if (row.has_heart !== true || (row.has_heart === true && movedPawnCheck.has_heart === true)) {
             // Base reset
             await tx.pawn.update({
               where: { id: row.id },
@@ -162,12 +169,12 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
                 current_position: '0',
                 moves: 0,
                 moves_lost: { increment: moves_lost },
-                is_safe: 1,
-                has_heart: 0
+                is_safe: true,
+                has_heart: false
               }
             });
 
-            const removeCapturerHeart = (row.has_heart === 1 && movedPawnCheck.has_heart === 1) ? 1 : 0;
+            const removeCapturerHeart = (row.has_heart === true && movedPawnCheck.has_heart === true);
             // Capturing pawn gains captured pawn moves
             let gainedMoves = row.moves || 0;
             if (gainedMoves > 0) {
@@ -175,14 +182,14 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
                   where: { id: pawn_id },
                   data: {
                     moves: { increment: gainedMoves },
-                    has_heart: { decrement: removeCapturerHeart }
+                    has_heart: removeCapturerHeart ? false : undefined
                   }
                 });
-            } else if (removeCapturerHeart > 0) {
+            } else if (removeCapturerHeart) {
                 await tx.pawn.update({
                   where: { id: pawn_id },
                   data: {
-                    has_heart: { decrement: removeCapturerHeart }
+                    has_heart: false
                   }
                 });
             }
@@ -206,7 +213,7 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
               to_position: "0",
               has_captured: false,
               got_captured: true,
-              captured_pawn_ids: null,
+              captured_pawn_ids: Prisma.DbNull,
               actual_moves: -moves_lost,
               prev_move_balance: Number(capturedFlmBefore?.current_move_balance || 0),
               at_dice_roll_balance: Number(capturedFlmBefore?.current_dice_roll_balance || 0)
@@ -233,7 +240,7 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
               }
             }
           } else {
-            await tx.pawn.update({ where: { id: row.id }, data: { has_heart: 0 } });
+            await tx.pawn.update({ where: { id: row.id }, data: { has_heart: false } });
           }
         }
       }
@@ -248,7 +255,7 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
         to_position: String(finalPosition || null),
         has_captured: has_captured ? true : false,
         got_captured: false,
-        captured_pawn_ids: has_captured ? captured_pawn_ids : null,
+        captured_pawn_ids: has_captured ? captured_pawn_ids : Prisma.DbNull,
         actual_moves: moves,
         prev_move_balance: Number(userBeforeMove.current_move_balance || 0),
         at_dice_roll_balance: Number(userBeforeMove.current_dice_roll_balance || 0)
@@ -270,7 +277,8 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
         updatedDice: updatedDiceRows,
         finalCellId,
         finalMoves,
-        movedPawnCheck
+        movedPawnCheck,
+        original_dice_value: dice_value
       };
     });
 
@@ -278,15 +286,15 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
       success: true,
       data: {
         board_id,
-        updatedPawns: (result as any).updatedPawns,
-        updatedPlayers: (result as any).updatedPlayers,
-        updatedDice: (result as any).updatedDice,
+        updatedPawns: result.updatedPawns,
+        updatedPlayers: result.updatedPlayers,
+        updatedDice: result.updatedDice,
         movedPawn: {
           pawn_id,
           player_id,
-          prev_position: (result as any).movedPawnCheck?.prev_position || "",
-          newPosition: (result as any).movedPawnCheck?.current_position || "",
-          steps: (result as any).finalMoves
+          prev_position: result.movedPawnCheck?.prev_position || "",
+          newPosition: result.movedPawnCheck?.current_position || "",
+          steps: result.finalMoves
         }
       }
     };
@@ -294,22 +302,23 @@ export const movePawn = async (io: Server, socket: GameSocket, payload: any, ack
     io.to(board_id).emit("pawnMoved", delta);
     
     // Check danger zone trigger
-    const finalCellId = (result as any).finalCellId;
+    const finalCellId = result.finalCellId;
     if (finalCellId === 18 || finalCellId === 7 || finalCellId === 3) {
       // NOTE: Pass null explicitly for 'ack' to avoid issues
-      await dangerZonePawnMove(io, socket, { board_id, pawn_id, player_id }, null);
+      await dangerZonePawnMove(io, socket, { board_id, pawn_id, player_id }, undefined);
     }
     
     // Advance turns
-    await advanceTurnAfterMove(io, board_id, player_id, null); // passing null will advance
+    const original_dice = result.original_dice_value;
+    await advanceTurnAfterMove(io, board_id, player_id, original_dice);
     
     return safeAck({ ok: true, msg: "Move committed & broadcast", ...delta });
 
-  } catch (err: any) {
-    if (err.message.includes("You do not have an active dice roll")) {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.message.includes("You do not have an active dice roll")) {
       return safeAck({ ok: false, msg: "You do not have an active dice roll to move with." });
     }
     console.error("Unexpected fatal error in movePawn:", err);
-    return safeAck({ ok: false, msg: "Unexpected server error", error: err.message });
+    return safeAck({ ok: false, msg: "Unexpected server error", error: err instanceof Error ? err.message : "Unknown error" });
   }
 };

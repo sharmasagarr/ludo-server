@@ -1,9 +1,16 @@
-export default function handleCapture(movedPawn: any, allPawnsAfterMove: any[]) {
+import { Pawn } from "@prisma/client";
+
+export default function handleCapture(movedPawn: Pawn, allPawnsAfterMove: Pawn[]) {
     let has_captured = 0;
-    let occupants: any[] = [];
+    let occupants: Pawn[] = [];
     let captured_pawn_ids: string[] = [];
     let kills = 0;
     const SAFE_IDS = new Set([14, 4]);
+    
+    if (!movedPawn.current_position) {
+        return {has_captured, captured_pawn_ids, kills};
+    }
+    
     const parts = movedPawn.current_position.split("-");
     const cellNum = Number.parseInt(parts[4], 10);
 

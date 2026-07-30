@@ -11,7 +11,8 @@ import { GameSocket, AuthenticatedUser } from "../types/index.js";
 export default function gameSocket(io: Server) {
     // Socket Authentication Middleware
     io.use((socket: GameSocket, next) => {
-        const token = socket.handshake.auth.token;
+        const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(" ")[1];
+        
         if (!token) {
             return next(new Error("Authentication error: No token provided"));
         }
@@ -28,12 +29,17 @@ export default function gameSocket(io: Server) {
     io.on("connection", (socket: GameSocket) => {
         console.log(`Socket connected: ${socket.id}`);
 
+        const wrapPayload = <T extends Record<string, unknown>>(payload: T) => ({
+            ...(payload || {}),
+            player_id: (payload && typeof payload === 'object' && 'player_id' in payload ? payload.player_id : socket.user?.id) as string
+        } as T & { player_id: string });
+
         // Register handlers, passing io and socket context along with the ack function
-        socket.on("playerJoined", (payload, ack) => playerJoined(io, socket, payload, ack));
-        socket.on("rollDice", (payload, ack) => rollDice(io, socket, payload, ack));
-        socket.on("movePawn", (payload, ack) => movePawn(io, socket, payload, ack));
-        socket.on("givePawnHeart", (payload) => givePawnHeart(io, socket, payload));
-        socket.on("suspendGame", (payload, ack) => suspendGame(io, socket, payload, ack));
+        socket.on("joinGame", (payload, ack) => playerJoined(io, socket, wrapPayload(payload), ack));
+        socket.on("rollDice", (payload, ack) => rollDice(io, socket, wrapPayload(payload), ack));
+        socket.on("movePawn", (payload, ack) => movePawn(io, socket, wrapPayload(payload), ack));
+        socket.on("givePawnHeart", (payload) => givePawnHeart(io, socket, wrapPayload(payload)));
+        socket.on("suspendGame", (payload, ack) => suspendGame(io, socket, wrapPayload(payload), ack));
 
         socket.on("disconnect", async () => {
             console.log(`Socket disconnected: ${socket.id}`);

@@ -31,7 +31,7 @@ export const checkExpiredBoards = async (): Promise<void> => {
 
     console.log(`[Cron Job] Found ${expiredBoards.length} expired board(s)`);
 
-    await prisma.$transaction(async (tx: any) => {
+    await prisma.$transaction(async (tx: import("@prisma/client").Prisma.TransactionClient) => {
 
     for (const board of expiredBoards) {
       // Check if board already has all winners set

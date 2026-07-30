@@ -1,4 +1,4 @@
-export function excelDateToJSDate(serial: any): any {
+export function excelDateToJSDate(serial: number | string): string | number | typeof serial {
   if (typeof serial !== "number") return serial;
   const utc_days = Math.floor(serial - 25569);
   const utc_value = utc_days * 86400;

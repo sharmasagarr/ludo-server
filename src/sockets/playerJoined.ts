@@ -3,8 +3,8 @@ import { recomputeTurnStateForBoard } from "./turnState.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
-export const playerJoined = async (io: Server, socket: GameSocket, payload: any, ack?: any) => {
-  const safeAck = (x: any) => {
+export const playerJoined = async (io: Server, socket: GameSocket, payload: { board_id: string; player_id: string; [key: string]: unknown }, ack?: (response?: unknown) => void) => {
+  const safeAck = (x: unknown) => {
     try {
       ack?.(x);
     } catch {}
@@ -63,7 +63,19 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
     });
 
     // ---- fetch players aggregation ----
-    let players: any[] = [];
+    let players: {
+      player_id: string;
+      playerName: string;
+      kills: number;
+      current_dice_roll_balance: number;
+      current_move_balance: number;
+      diamonds: number;
+      moves: number;
+      moves_lost: number;
+      color: string | null;
+      home: number;
+      last_moved_at: Date | null;
+    }[] = [];
     if (playerIds.length > 0) {
       const usersInfo = await prisma.user.findMany({
         where: { id: { in: playerIds } },
@@ -76,14 +88,14 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
         }
       });
       // Merge with pawn stats natively
-      players = usersInfo.map((u: any) => {
-        const userPawns = pawns.filter((p: any) => p.player_id === u.id);
-        const homeCount = userPawns.filter((p: any) => p.type === 'center').length;
-        const totalKills = userPawns.reduce((sum: number, p: any) => sum + (p.kills || 0), 0);
-        const totalMoves = userPawns.reduce((sum: number, p: any) => sum + (p.moves || 0), 0);
-        const totalMovesLost = userPawns.reduce((sum: number, p: any) => sum + (p.moves_lost || 0), 0);
+      players = usersInfo.map((u) => {
+        const userPawns = pawns.filter((p: import("@prisma/client").Pawn) => p.player_id === u.id);
+        const homeCount = userPawns.filter((p: import("@prisma/client").Pawn) => p.type === 'center').length;
+        const totalKills = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.kills || 0), 0);
+        const totalMoves = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.moves || 0), 0);
+        const totalMovesLost = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.moves_lost || 0), 0);
         const color = userPawns.length > 0 ? userPawns[0].color : "";
-        const maxMovedAt = userPawns.reduce((max: Date | null, p: any) => p.last_moved_at && (!max || p.last_moved_at > max) ? p.last_moved_at : max, null as Date | null);
+        const maxMovedAt = userPawns.reduce((max: Date | null, p: import("@prisma/client").Pawn) => p.last_moved_at && (!max || p.last_moved_at > max) ? p.last_moved_at : max, null as Date | null);
 
         return {
           player_id: u.id,
@@ -109,9 +121,9 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
       include: { player: { select: { name: true } } },
       orderBy: { rolled_at: 'desc' }
     });
-    const dice_value = diceRolls.map((dr: any) => ({
+    const dice_value = diceRolls.map((dr: import("@prisma/client").DiceRoll & { player?: { name: string | null } }) => ({
       player_id: dr.player_id,
-      name: dr.player.name,
+      name: dr.player?.name,
       dice_value: dr.dice_value,
       rolled_at: dr.rolled_at
     }));
@@ -125,7 +137,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
       return null; // Game still in progress
     };
 
-    const getRank = (pid: string, playersArr: any[]) => {
+    const getRank = (pid: string, playersArr: typeof players) => {
       const sorted = [...playersArr].sort((a, b) => b.moves - a.moves);
       const index = sorted.findIndex((p) => p.player_id === pid);
       return index === -1 ? null : index + 1;
@@ -147,9 +159,9 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
 
     // Join the socket to the board room
     await socket.join(board_id);
-    (socket as any).board_id = board_id;
-    (socket as any).player_id = player_id;
-    (socket as any).joinedAt = new Date().toISOString();
+    socket.board_id = board_id;
+    socket.player_id = player_id;
+    (socket as GameSocket & { joinedAt?: string }).joinedAt = new Date().toISOString();
 
     console.log(
       `Player ${player_id} joined board ${board_id} with socket ${socket.id}`
@@ -167,10 +179,10 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
     socket.to(board_id).emit("playerJoined", {
       board_id,
       player_id,
-      playerName: players.find((player: any) => player.player_id === player_id)?.playerName || "Unknown", 
+      playerName: players.find((player: typeof players[0]) => player.player_id === player_id)?.playerName || "Unknown", 
       turnState,
       socketId: socket.id,
-      joinedAt: (socket as any).joinedAt,
+      joinedAt: (socket as GameSocket & { joinedAt?: string }).joinedAt,
       message: `Player ${player_id} has joined the game`,
       totalPlayers: roomSize,
     });
@@ -195,7 +207,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
       turnState,
       data: {
         board_id: board.id,
-        players: players.map((r: any) => ({
+        players: players.map((r: typeof players[0]) => ({
           player_id: r.player_id,
           playerName: r.playerName,
           kills: Number(r.kills ?? 0),
@@ -213,12 +225,12 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: any,
         pawns,
       },
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error in playerJoined:", error);
     return safeAck({
       ok: false,
       msg: "Failed to join game",
-      error: error.message,
+      error: error instanceof Error ? error.message : "Unknown error",
     });
   }
 };

@@ -2,9 +2,18 @@ import type { GameSocket } from "../types/index.js";
 import prisma from "../config/prisma.js";
 import { Server } from "socket.io";
 
-const boardTurnState: Record<string, any> = {};
-const boardTurnTimers: Record<string, any> = {};
-let handleTurnTimeout: any;
+import { User, Pawn, DiceRoll } from "@prisma/client";
+
+interface TurnState {
+  mode: string;
+  currentTurnPlayerId: string | null;
+  turnOrder: string[];
+  timerNonce: number;
+}
+
+const boardTurnState: Record<string, TurnState> = {};
+const boardTurnTimers: Record<string, NodeJS.Timeout> = {};
+let handleTurnTimeout: (io: Server, board_id: string) => Promise<void>;
 
 export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true) => {
   if (!board_id) return;
@@ -31,18 +40,18 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
     select: { id: true, current_dice_roll_balance: true }
   });
 
-  const rows = users.map((u: any) => ({
+  const rows = users.map((u: Partial<User>) => ({
     player_id: u.id,
     current_dice_roll_balance: Number(u.current_dice_roll_balance || 0)
   }));
 
   const activeTurnPlayers = rows
       .filter(
-          (r: any) =>
+          (r: { player_id?: string; current_dice_roll_balance: number }) =>
           r.player_id &&
           onlineIds.has(r.player_id)
       )
-      .map((r: any) => r.player_id);
+      .map((r: { player_id?: string }) => r.player_id as string);
 
   let mode: string;
   let currentTurnPlayerId: string | null = null;
@@ -158,7 +167,7 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
       for (const pawn of playerPawns) {
         if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
         const currPos = pawn.current_position || "0"; 
-        const moveResult = handleFinalPos(currPos, Number(pendingDiceValue || 0), String(pawn.color || "red") as any, pawn.type as any);
+        const moveResult = handleFinalPos(currPos, Number(pendingDiceValue || 0), String(pawn.color || "red"), String(pawn.type));
         if (moveResult && !moveResult.error) {
            validPawns.push(pawn.id);
         }
@@ -221,9 +230,9 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
       orderBy: { rolled_at: 'desc' }
     });
 
-    const updatedPlayers = diceRolls.map((dr: any) => ({
+    const updatedPlayers = diceRolls.map((dr: Partial<DiceRoll> & { player?: { name: string | null } }) => ({
       player_id: dr.player_id,
-      name: dr.player.name,
+      name: dr.player?.name,
       dice_value: dr.dice_value,
       rolled_at: dr.rolled_at
     }));
@@ -234,7 +243,7 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
       board_id,
       player_id: timedOutPlayerId,
       dice_value: null,
-      allPlayersDice: updatedPlayers.map((p: any) => {
+      allPlayersDice: updatedPlayers.map((p: typeof updatedPlayers[0]) => {
         const s = sockets.find(s => (s as unknown as GameSocket).player_id === p.player_id);
         return {
           player_id: p.player_id,
@@ -365,8 +374,8 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
         where: { board_id }
       });
 
-      const parsedPlayers = users.map((u: any) => {
-        const userPawns = pawns.filter((p: any) => p.player_id === u.id);
+      const parsedPlayers = users.map((u: Partial<User>) => {
+        const userPawns = pawns.filter((p: Pawn) => p.player_id === u.id);
         const color = userPawns.length > 0 ? userPawns[0].color : "";
         return {
           player_id: u.id,

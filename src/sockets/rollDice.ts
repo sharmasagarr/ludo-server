@@ -1,11 +1,17 @@
 import prisma from "../config/prisma.js";
+import { Prisma, DiceRoll } from "@prisma/client";
 import { canPlayerAct, recomputeTurnStateForBoard, advanceTurnAfterMove, startTurnTimer } from "./turnState.js"; 
 import handleFinalPos from "../utils/handleFinalPos.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
-export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
-  const safeAck = (x: any) => { try { ack?.(x); } catch {} };
+export const rollDice = async (
+  io: Server, 
+  socket: GameSocket, 
+  payload: { board_id: string; player_id: string; [key: string]: unknown }, 
+  ack: (response?: unknown) => void
+) => {
+  const safeAck = (x: unknown) => { try { ack?.(x); } catch {} };
 
   try {
     const { board_id, player_id } = payload ?? {};
@@ -56,9 +62,9 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
 
     let valid_moves = false;
     let validPawnIds: string[] = [];
-    let allPlayers: any[] = [];
+    let allPlayers: (DiceRoll & { player?: { name: string | null } })[] = [];
 
-    await prisma.$transaction(async (tx: any) => {
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // If dice is not 6, decrement the player's current_dice_roll_balance
       if (dice_value !== 6) {
         const u = await tx.user.findUnique({ where: { id: player_id } });
@@ -75,11 +81,10 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
         where: { board_id, player_id }
       });
 
-    let valid_moves = false;
-    let validPawnIds: string[] = [];
+
     for (const pawn of playerPawns) {
       if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
-      const moveResult = handleFinalPos(pawn.current_position, dice_value, pawn.color, pawn.type);
+      const moveResult = handleFinalPos(pawn.current_position, dice_value, pawn.color as string, pawn.type as string);
       if (moveResult && !moveResult.error) {
         valid_moves = true;
         validPawnIds.push(pawn.id);
@@ -98,7 +103,7 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
           board_id,
           player_id,
           dice_value,
-          valid_moves: valid_moves as any,
+          valid_moves: valid_moves,
           rolled_at: new Date()
         }
       });
@@ -120,7 +125,7 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
       isAllPawnsLocked: valid_moves === false, // for client animation timing
       allPlayersDice: allPlayers.map(p => ({
         player_id: p.player_id,
-        playerName: p.player.name,
+        playerName: p.player?.name,
         dice_value: p.dice_value,
         rolled_at: p.rolled_at,
         isDiceRolling: p.player_id === player_id // only rolling player has animation
@@ -196,9 +201,9 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
         board_id,
         player_id,
         dice_value: null,
-        allPlayersDice: updatedPlayers.map((p: any) => ({
+        allPlayersDice: updatedPlayers.map((p: DiceRoll & { player?: { name: string | null } }) => ({
           player_id: p.player_id,
-          playerName: p.player.name,
+          playerName: p.player?.name,
           dice_value: p.dice_value,
           rolled_at: p.rolled_at
         }))
@@ -213,12 +218,12 @@ export const rollDice = async (io: Server, socket: GameSocket, payload: any, ack
 
     return;
 
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error in rollDice:", err);
     return safeAck({
       ok: false,
       msg: "Failed to roll dice",
-      error: err.message
+      error: err instanceof Error ? err.message : "Unknown error"
     });
   }
 };

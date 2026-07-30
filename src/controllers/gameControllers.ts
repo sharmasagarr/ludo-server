@@ -41,7 +41,7 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
     const board_id = board.id;
 
     // Initialize pawns for Player 1 (Red by default)
-    await initializePawns(board_id, player_id, PLAYER_COLORS[0] as any);
+    await initializePawns(board_id, player_id, PLAYER_COLORS[0] as "red"|"blue"|"green"|"yellow");
 
     res.status(200).json({
       success: true,
@@ -98,7 +98,7 @@ export const joinGame = async (req: AuthRequest, res: Response): Promise<void> =
       data: { [slotToFill]: player_id }
     });
 
-    await initializePawns(board_id, player_id, PLAYER_COLORS[colorIndex] as any);
+    await initializePawns(board_id, player_id, PLAYER_COLORS[colorIndex] as "red"|"blue"|"green"|"yellow");
 
     res.status(200).json({
       success: true,

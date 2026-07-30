@@ -3,7 +3,7 @@ import { recomputeTurnStateForBoard } from "./turnState.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
-export const suspendGame = async (io: Server, socket: GameSocket, payload: any, ack: any) => {
+export const suspendGame = async (io: Server, socket: GameSocket, payload: { board_id: string; player_id: string; [key: string]: unknown }, ack?: (response?: unknown) => void) => {
   const { board_id, player_id } = payload;
   
   if (!board_id || !player_id) {
