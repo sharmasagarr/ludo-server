@@ -15,7 +15,7 @@ const boardTurnState: Record<string, TurnState> = {};
 const boardTurnTimers: Record<string, NodeJS.Timeout> = {};
 let handleTurnTimeout: (io: Server, board_id: string) => Promise<void>;
 
-export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true) => {
+export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true, skipBalanceReplenish: boolean = false) => {
   if (!board_id) return;
 
   // 1) find online players in this board (from sockets)
@@ -82,7 +82,7 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
   const timerNonce = Date.now();
   boardTurnState[board_id] = { mode, currentTurnPlayerId, turnOrder, timerNonce };
 
-  if (currentTurnPlayerId) {
+  if (currentTurnPlayerId && !skipBalanceReplenish) {
     try {
       const u = await prisma.user.findUnique({ where: { id: currentTurnPlayerId } });
       
@@ -327,7 +327,7 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
   if (!board_id || !lastPlayerId) return;
 
   // Pass false to prevent a redundant broadcast just for reading the state
-  const state = await recomputeTurnStateForBoard(io, board_id, false);
+  const state = await recomputeTurnStateForBoard(io, board_id, false, true); // pass true to skipBalanceReplenish
   if (!state || state.mode !== "turn") {
     clearTurnTimer(board_id); // no strict turn
     return;
@@ -339,7 +339,14 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
     return;
   }
 
-  if (Number(dice_value) === 6 && turnOrder.includes(lastPlayerId)) {
+  const uInfo = await prisma.user.findUnique({
+    where: { id: lastPlayerId },
+    select: { current_dice_roll_balance: true }
+  });
+  const finalBalance = Number(uInfo?.current_dice_roll_balance || 0);
+
+  // If you rolled a 6 OR you earned an extra roll (e.g. via a capture or reaching home), you keep the turn!
+  if ((Number(dice_value) === 6 || finalBalance > 0) && turnOrder.includes(lastPlayerId)) {
     state.currentTurnPlayerId = lastPlayerId;
   } else {
     let idx = turnOrder.indexOf(lastPlayerId);

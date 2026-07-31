@@ -17,8 +17,8 @@ export const rollDice = async (
     const { board_id, player_id } = payload ?? {};
 
     // 🎲 Securely generate dice roll on the backend (1-6)
-    const dice_value = Math.floor(Math.random() * 6) + 1;
-    // const dice_value = 1;
+    // const dice_value = Math.floor(Math.random() * 6) + 1;
+    const dice_value = 2;
 
     // Basic validation
     if (!board_id || !player_id) {

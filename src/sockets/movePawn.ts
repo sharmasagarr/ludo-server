@@ -90,6 +90,12 @@ export const movePawn = async (
 
       // Check if finished logic
       if (finalType === 'center' || finalPosition === 'finished') {
+        // Player gets an extra turn for bringing a pawn home
+        await tx.user.update({
+          where: { id: player_id },
+          data: { current_dice_roll_balance: { increment: 1 } }
+        });
+
         const finishedPawns = await tx.pawn.count({ where: { player_id, board_id, type: 'center' } });
         if (finishedPawns === 4) {
           const boardBefore = await tx.board.findUnique({ where: { id: board_id } });
@@ -173,6 +179,7 @@ export const movePawn = async (
                 has_heart: false
               }
             });
+            changedPawnIds.add(row.id);
 
             const removeCapturerHeart = (row.has_heart === true && movedPawnCheck.has_heart === true);
             // Capturing pawn gains captured pawn moves
@@ -241,6 +248,7 @@ export const movePawn = async (
             }
           } else {
             await tx.pawn.update({ where: { id: row.id }, data: { has_heart: false } });
+            changedPawnIds.add(row.id);
           }
         }
       }
