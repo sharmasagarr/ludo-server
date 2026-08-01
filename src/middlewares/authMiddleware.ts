@@ -17,10 +17,10 @@ export const authenticateUser = async (req: AuthRequest, res: Response, next: Ne
     // Check if user is deleted or inactive
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      select: { status: true, is_deleted: true }
+      select: { is_active: true, is_deleted: true }
     });
 
-    if (!user || user.is_deleted || !user.status) {
+    if (!user || user.is_deleted || user.is_active === false) {
       res.status(403).json({ message: "Account disabled or deleted." });
       return;
     }
