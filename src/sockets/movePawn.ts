@@ -1,5 +1,6 @@
 import prisma from "../config/prisma.js";
-import { Prisma, Pawn } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import { mapPawnToClient, strToPos, MappedPawn } from "../utils/positionMapper.js";
 import handleFinalPos from "../utils/handleFinalPos.js";
 import handleCapture from "../utils/handleCapture.js";
 import { canPlayerAct, advanceTurnAfterMove } from "./turnState.js"; 
@@ -29,19 +30,20 @@ export const movePawn = async (
 
     const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // BACKEND DICE SECURITY CHECK 
-      const diceRoll = await tx.diceRoll.findUnique({ where: { player_id } });
-      const dice_value = diceRoll?.dice_value;
+      const playerBp = await tx.boardPlayer.findUnique({ where: { board_id_user_id: { board_id, user_id: player_id } } });
+      const dice_value = playerBp?.dice_value;
       if (dice_value === null || dice_value === undefined) {
         throw new Error("You do not have an active dice roll to move with.");
       }
 
-      const userBeforeMove = await tx.user.findUnique({ where: { id: player_id } });
-      if (!userBeforeMove) throw new Error("User not found");
+      const userBeforeMove = await tx.boardPlayer.findUnique({ where: { board_id_user_id: { board_id, user_id: player_id } } });
+      if (!userBeforeMove) throw new Error("User not found in board");
 
-      const allPawnsBeforeMove = await tx.pawn.findMany({ where: { board_id } });
-      const movingPawn = allPawnsBeforeMove.find((p: Pawn) => p.id === pawn_id);
+      const allPawnsBeforeMoveRaw = await tx.pawn.findMany({ where: { boardPlayer: { board_id } }, include: { boardPlayer: true } });
+      const allPawnsBeforeMove = allPawnsBeforeMoveRaw.map(mapPawnToClient);
+      const movingPawn = allPawnsBeforeMove.find((p: MappedPawn) => p.id === pawn_id);
       if (!movingPawn) throw new Error(`Pawn not found: ${pawn_id}`);
-      if (movingPawn.player_id !== player_id) throw new Error("Unauthorized pawn move");
+      if (movingPawn.board_player_id !== userBeforeMove.id) throw new Error("Unauthorized pawn move");
 
       const moveResult = handleFinalPos(movingPawn.current_position, dice_value, movingPawn.color as string, movingPawn.type as string);
       if (!moveResult || moveResult.error) {
@@ -56,12 +58,17 @@ export const movePawn = async (
       const changedPawnIds = new Set([pawn_id]);
 
       // 1) Update moving pawn
+      const { area: next_area, cell: next_cell } = strToPos(finalPosition as string);
+      const { area: prev_area, cell: prev_cell } = strToPos(movingPawn.current_position);
+
       await tx.pawn.update({
         where: { id: pawn_id },
         data: {
-          type: finalType as import("@prisma/client").PawnType,
-          prev_position: String(movingPawn.current_position || ""),
-          current_position: String(finalPosition || ""),
+          cell_type: finalType as import("@prisma/client").CellType,
+          prev_area,
+          prev_cell,
+          current_area: next_area,
+          current_cell: next_cell,
           is_safe: is_safe ? true : false,
           moves: { increment: moves },
           last_moved_at: new Date()
@@ -70,18 +77,19 @@ export const movePawn = async (
 
       // Handle un-basing mechanics if moving into center/home
       if (finalType === 'center' || finalType === 'home') {
-        const remainingMainPawns = await tx.pawn.count({ where: { player_id, board_id, type: 'main' } });
-        const hasBasePawns = await tx.pawn.count({ where: { player_id, board_id, type: 'base' } });
+        const remainingMainPawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'main' } });
+        const hasBasePawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'base' } });
 
         if (remainingMainPawns === 0 && hasBasePawns > 0) {
           const basePawnsToUnlock = await tx.pawn.findMany({
-            where: { player_id, board_id, type: 'base' },
+            where: { board_player_id: userBeforeMove.id, cell_type: 'base' },
             take: 1
           });
           if (basePawnsToUnlock.length > 0) {
+            const { area: start_a, cell: start_c } = strToPos(startPosition as string);
             await tx.pawn.update({
               where: { id: basePawnsToUnlock[0].id },
-              data: { type: 'main', prev_position: '0', current_position: startPosition, last_moved_at: new Date() }
+              data: { cell_type: 'main', prev_area: null, prev_cell: null, current_area: start_a, current_cell: start_c, last_moved_at: new Date() }
             });
             changedPawnIds.add(basePawnsToUnlock[0].id);
           }
@@ -90,54 +98,33 @@ export const movePawn = async (
 
       // Check if finished logic
       if (finalType === 'center' || finalPosition === 'finished') {
-        // Player gets an extra turn for bringing a pawn home
-        await tx.user.update({
-          where: { id: player_id },
-          data: { current_dice_roll_balance: { increment: 1 } }
-        });
 
-        const finishedPawns = await tx.pawn.count({ where: { player_id, board_id, type: 'center' } });
-        if (finishedPawns === 4) {
-          const boardBefore = await tx.board.findUnique({ where: { id: board_id } });
-          if (boardBefore) {
-            if (!boardBefore.winner1) {
-              await tx.board.update({ where: { id: board_id }, data: { winner1: player_id } });
-            } else if (!boardBefore.winner2) {
-              await tx.board.update({ where: { id: board_id }, data: { winner2: player_id } });
-            } else if (!boardBefore.winner3) {
-              await tx.board.update({ where: { id: board_id }, data: { winner3: player_id } });
-            }
-
-            const boardAfter = await tx.board.findUnique({ where: { id: board_id } });
-            if (boardAfter && boardAfter.winner3 && !boardAfter.loser) {
-              const allPlayers = [boardAfter.player1, boardAfter.player2, boardAfter.player3, boardAfter.player4].filter((p): p is string => Boolean(p));
-              const winners = [boardAfter.winner1, boardAfter.winner2, boardAfter.winner3];
-              const remainingPlayer = allPlayers.find((p: string) => !winners.includes(p));
-              if (remainingPlayer) {
-                await tx.board.update({
-                  where: { id: board_id },
-                  data: { loser: remainingPlayer, status: "finished", end_time: new Date() }
-                });
-              }
+        const finishedPawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'center' } });
+        if (finishedPawns === 4 && userBeforeMove.rank === null) {
+          const finishedCount = await tx.boardPlayer.count({ where: { board_id, rank: { not: null } } });
+          const newRank = finishedCount + 1;
+          await tx.boardPlayer.update({ where: { id: userBeforeMove.id }, data: { rank: newRank } });
+          
+          if (newRank === 3) {
+            const players = await tx.boardPlayer.findMany({ where: { board_id } });
+            const loserBp = players.find(p => p.rank === null && p.id !== userBeforeMove.id);
+            if (loserBp) {
+              await tx.boardPlayer.update({ where: { id: loserBp.id }, data: { rank: 4, is_looser: true } });
+              await tx.board.update({ where: { id: board_id }, data: { status: "finished", end_time: new Date() } });
             }
           }
         }
       }
 
-      // 2) Update user moves
-      await tx.user.update({
-        where: { id: player_id },
-        data: { current_move_balance: { increment: moves } }
-      });
-
       // 3) Consume Dice
-      await tx.diceRoll.update({
-        where: { player_id },
+      await tx.boardPlayer.update({
+        where: { board_id_user_id: { board_id, user_id: player_id } },
         data: { dice_value: null }
       });
 
-      const allPawnsAfterMove = await tx.pawn.findMany({ where: { board_id } });
-      const movedPawnCheck = allPawnsAfterMove.find((p: Pawn) => p.id === pawn_id);
+      const allPawnsAfterMoveRaw = await tx.pawn.findMany({ where: { boardPlayer: { board_id } }, include: { boardPlayer: true } });
+      const allPawnsAfterMove = allPawnsAfterMoveRaw.map(mapPawnToClient);
+      const movedPawnCheck = allPawnsAfterMove.find((p: MappedPawn) => p.id === pawn_id);
       if (!movedPawnCheck) throw new Error("Pawn not found after move");
       
       const captureResult = handleCapture(movedPawnCheck, allPawnsAfterMove);
@@ -147,9 +134,9 @@ export const movePawn = async (
       
       // 4) Captures handling
       if (has_captured && Array.isArray(captured_pawn_ids) && captured_pawn_ids.length > 0) {
-        await tx.user.update({
-          where: { id: player_id },
-          data: { kills: { increment: kills }, current_dice_roll_balance: { increment: 1 } }
+        await tx.boardPlayer.update({
+          where: { board_id_user_id: { board_id, user_id: player_id } },
+          data: { kills: { increment: kills } }
         });
         
         await tx.pawn.update({
@@ -157,22 +144,27 @@ export const movePawn = async (
           data: { kills: { increment: kills } }
         });
 
-        const capPawns = await tx.pawn.findMany({ where: { id: { in: captured_pawn_ids } } });
+        const capPawnsRaw = await tx.pawn.findMany({ where: { id: { in: captured_pawn_ids } }, include: { boardPlayer: true } });
+        const capPawns = capPawnsRaw.map(mapPawnToClient);
         for (const row of capPawns) {
-          affectedPlayerIds.add(row.player_id);
+          const capturedFlmBefore = await tx.boardPlayer.findUnique({ where: { id: row.board_player_id } });
+          if (!capturedFlmBefore) continue;
+          
+          affectedPlayerIds.add(capturedFlmBefore.user_id);
           const fromPos = String(row.current_position || "0");
           const moves_lost = Math.abs(row.moves || 0);
+          const { area: from_area, cell: from_cell } = strToPos(fromPos);
           
-          const capturedFlmBefore = await tx.user.findUnique({ where: { id: row.player_id } });
-
           if (row.has_heart !== true || (row.has_heart === true && movedPawnCheck.has_heart === true)) {
             // Base reset
             await tx.pawn.update({
               where: { id: row.id },
               data: {
-                type: 'base',
-                prev_position: fromPos,
-                current_position: '0',
+                cell_type: 'base',
+                prev_area: from_area,
+                prev_cell: from_cell,
+                current_area: null,
+                current_cell: null,
                 moves: 0,
                 moves_lost: { increment: moves_lost },
                 is_safe: true,
@@ -201,47 +193,38 @@ export const movePawn = async (
                 });
             }
 
-            const currentCapBal = Number(capturedFlmBefore?.current_move_balance) || 0;
-            await tx.user.update({
-              where: { id: row.player_id },
-              data: { current_move_balance: Math.max(currentCapBal - (row.moves || 0), 0) }
-            });
-            await tx.user.update({
-              where: { id: player_id },
-              data: { current_move_balance: { increment: (row.moves || 0) } }
-            });
-
             captureLogs.push({
-              board_id,
-              player_id: row.player_id,
+              board_player_id: capturedFlmBefore.id,
               pawn_id: row.id,
               dice_value: null,
-              from_position: fromPos,
-              to_position: "0",
+              from_area,
+              from_cell,
+              to_area: null,
+              to_cell: null,
               has_captured: false,
               got_captured: true,
               captured_pawn_ids: Prisma.DbNull,
               actual_moves: -moves_lost,
-              prev_move_balance: Number(capturedFlmBefore?.current_move_balance || 0),
-              at_dice_roll_balance: Number(capturedFlmBefore?.current_dice_roll_balance || 0)
+              prev_move_balance: 0
             });
 
             // Auto-unlock
-            const remainingMainPawnsForCaptured = await tx.pawn.count({ where: { player_id: row.player_id, board_id, type: 'main' } });
-            const hasBasePawnsForCaptured = await tx.pawn.count({ where: { player_id: row.player_id, board_id, type: 'base' } });
+            const remainingMainPawnsForCaptured = await tx.pawn.count({ where: { board_player_id: row.board_player_id, cell_type: 'main' } });
+            const hasBasePawnsForCaptured = await tx.pawn.count({ where: { board_player_id: row.board_player_id, cell_type: 'base' } });
             
             if (remainingMainPawnsForCaptured === 0 && hasBasePawnsForCaptured > 0) {
-              const homeAreaIdByColor: Record<string, number> = { blue: 1, red: 2, green: 3, yellow: 4 };
-              const capturedStartPos = `cell-area-${homeAreaIdByColor[row.color as string]}-id-14`;
+              const homeAreaIdByColor: Record<string, number> = { blue: 1, red: 2, green: 3, yellow: 4, orange: 5, pink: 6 };
+              const reqColor = row.color as string;
+              const { area: unlock_a, cell: unlock_c } = { area: homeAreaIdByColor[reqColor], cell: 14 };
               const basePawnsToUnlockCaptured = await tx.pawn.findMany({
-                where: { player_id: row.player_id, board_id, type: 'base' },
+                where: { board_player_id: row.board_player_id, cell_type: 'base' },
                 take: 1
               });
               
               if (basePawnsToUnlockCaptured.length > 0) {
                 await tx.pawn.update({
                   where: { id: basePawnsToUnlockCaptured[0].id },
-                  data: { type: 'main', prev_position: '0', current_position: capturedStartPos, last_moved_at: new Date() }
+                  data: { cell_type: 'main', prev_area: null, prev_cell: null, current_area: unlock_a, current_cell: unlock_c, last_moved_at: new Date() }
                 });
                 changedPawnIds.add(basePawnsToUnlockCaptured[0].id);
               }
@@ -254,30 +237,37 @@ export const movePawn = async (
       }
 
       // Add main mover log
+      const { area: to_area, cell: to_cell } = strToPos(finalPosition as string);
       captureLogs.unshift({
-        board_id,
-        player_id,
+        board_player_id: userBeforeMove.id,
         pawn_id,
         dice_value,
-        from_position: String(movingPawn.current_position || null),
-        to_position: String(finalPosition || null),
+        from_area: prev_area,
+        from_cell: prev_cell,
+        to_area,
+        to_cell,
         has_captured: has_captured ? true : false,
         got_captured: false,
         captured_pawn_ids: has_captured ? captured_pawn_ids : Prisma.DbNull,
         actual_moves: moves,
-        prev_move_balance: Number(userBeforeMove.current_move_balance || 0),
-        at_dice_roll_balance: Number(userBeforeMove.current_dice_roll_balance || 0)
+        prev_move_balance: 0
       });
 
       await tx.moveLog.createMany({ data: captureLogs });
 
       // Generate delta snapshot inside tx context
-      const updatedPawns = await tx.pawn.findMany({
-        where: { id: { in: Array.from(changedPawnIds) } }
+      const updatedPawnsRaw = await tx.pawn.findMany({
+        where: { id: { in: Array.from(changedPawnIds) } },
+        include: { boardPlayer: true }
       });
+      const updatedPawns = updatedPawnsRaw.map(mapPawnToClient);
       
       const updatedPlayers = await buildPlayerStatsPayload(tx, board_id, affectedPlayerIds);
-      const updatedDiceRows = await tx.diceRoll.findMany({ where: { player_id } });
+      
+      // Send the latest updated player bp dice rolls 
+      const updatedDiceRows = await tx.boardPlayer.findMany({
+        where: { board_id, user_id: player_id }
+      });
 
       return {
         updatedPawns,

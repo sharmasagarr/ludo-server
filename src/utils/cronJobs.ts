@@ -1,6 +1,6 @@
 import cron from "node-cron";
 import prisma from "../config/prisma.js";
-import { formatISTDateTimeForSQL, formatISTDateForSQL, getISTDateTime } from "./istDateTime.js";
+import { formatISTDateTimeForSQL, getISTDateTime } from "./istDateTime.js";
 
 /**
  * Check and finish expired boards based on end_time
@@ -13,14 +13,17 @@ export const checkExpiredBoards = async (): Promise<void> => {
     const now = getISTDateTime();
     const todayStart = new Date(now);
     todayStart.setUTCHours(0, 0, 0, 0);
-    const todayStartIST = formatISTDateTimeForSQL(todayStart);
-    const todayDateIST = formatISTDateForSQL(todayStart);
+    // const todayStartIST = formatISTDateTimeForSQL(todayStart);
+    // const todayDateIST = formatISTDateForSQL(todayStart);
 
     const nowStr = formatISTDateTimeForSQL();
     const expiredBoards = await prisma.board.findMany({
       where: {
         end_time: { not: null, lte: new Date(nowStr) },
         status: { not: "finished" }
+      },
+      include: {
+        players: true
       }
     });
 
@@ -35,87 +38,59 @@ export const checkExpiredBoards = async (): Promise<void> => {
 
     for (const board of expiredBoards) {
       // Check if board already has all winners set
-      const hasAllWinners = board.winner1 && board.winner2 && board.winner3;
+      const hasAllWinners = board.players.filter(p => p.rank !== null).length === 3;
 
       if (!hasAllWinners) {
-        // Get all players for this board
-        const players = [
-          board.player1,
-          board.player2,
-          board.player3,
-          board.player4,
-        ].filter((p): p is string => !!p);
-
-        // Calculate total moves earned for each player on this board from move_logs
-        const playerMoves = await tx.moveLog.groupBy({
-          by: ['player_id'],
-          where: { board_id: board.id, actual_moves: { gt: 0 } },
+        const boardPlayerIds = board.players.map(p => p.id);
+        const moveStats = await tx.moveLog.groupBy({
+          by: ['board_player_id'],
+          where: { board_player_id: { in: boardPlayerIds }, actual_moves: { gt: 0 } },
           _sum: { actual_moves: true },
-          orderBy: { _sum: { actual_moves: 'desc' } }
+        });
+        
+        // Default 0 for anyone who hasn't moved
+        const defaultStats = board.players.map(p => ({
+          board_player_id: p.id,
+          user_id: p.user_id,
+          moves: 0
+        }));
+
+        const aggregated = defaultStats.map(ds => {
+          const pm = moveStats.find(x => x.board_player_id === ds.board_player_id);
+          return {
+            ...ds,
+            moves: Number(pm?._sum?.actual_moves) || 0
+          };
         });
 
-        // Create a map of player_id to moves
-        const movesMap = new Map();
-        for (const pm of playerMoves) {
-          movesMap.set(pm.player_id, Number(pm._sum.actual_moves) || 0);
-        }
-
-        // Ensure all players are in the map (with 0 moves if no moves logged)
-        for (const player_id of players) {
-          if (!movesMap.has(player_id)) {
-            movesMap.set(player_id, 0);
-          }
-        }
-
         // Sort players by moves (descending)
-        const sortedPlayers = players
-          .map(player_id => ({
-            player_id,
-            moves: movesMap.get(player_id) || 0,
-          }))
-          .sort((a, b) => b.moves - a.moves);
+        const sortedPlayers = [...aggregated].sort((a, b) => b.moves - a.moves);
 
-        // Determine winners and loser
-        let winner1 = null;
-        let winner2 = null;
-        let winner3 = null;
-        let loser = null;
-
-        if (sortedPlayers.length >= 1) {
-          winner1 = sortedPlayers[0].player_id;
-        }
-        if (sortedPlayers.length >= 2) {
-          winner2 = sortedPlayers[1].player_id;
-        }
-        if (sortedPlayers.length >= 3) {
-          winner3 = sortedPlayers[2].player_id;
-        }
-        if (sortedPlayers.length >= 4) {
-          loser = sortedPlayers[3].player_id;
-        } else if (sortedPlayers.length === 3) {
-          // For 3 players, the one with least moves is loser
-          loser = sortedPlayers[2].player_id;
-        } else if (sortedPlayers.length === 2) {
-          // For 2 players, the one with least moves is loser
-          loser = sortedPlayers[1].player_id;
-        }
-
-        // Update board with winners, loser, status, and end_time
+        // Determine winners and loser (ranks)
         const endTimeIST = new Date(formatISTDateTimeForSQL());
+        
+        for (let i = 0; i < sortedPlayers.length; i++) {
+          const agg = sortedPlayers[i];
+          const rank = i < 3 ? i + 1 : 4;
+          const is_looser = (i === sortedPlayers.length - 1);
+          
+          await tx.boardPlayer.update({
+            where: { id: agg.board_player_id },
+            data: { rank, is_looser }
+          });
+        }
+
+        // Update board status and end_time
         await tx.board.update({
           where: { id: board.id },
           data: {
-            winner1,
-            winner2,
-            winner3,
-            loser,
             status: "finished",
             end_time: endTimeIST
           }
         });
 
         console.log(
-          `[Cron Job] Board ${board.id} finished: Winner1=${winner1}, Winner2=${winner2}, Winner3=${winner3}, Loser=${loser}`
+          `[Cron Job] Board ${board.id} finished logically based on moves.`
         );
       } else {
         // Board already has winners, just mark as finished

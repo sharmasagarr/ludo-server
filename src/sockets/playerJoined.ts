@@ -1,5 +1,6 @@
 import prisma from "../config/prisma.js";
 import { recomputeTurnStateForBoard } from "./turnState.js"; 
+import { mapPawnToClient, MappedPawn } from "../utils/positionMapper.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
@@ -26,13 +27,9 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     const activeBoard = await prisma.board.findFirst({
       where: {
         status: "active",
-        OR: [
-          { player1: player_id },
-          { player2: player_id },
-          { player3: player_id },
-          { player4: player_id },
-        ]
+        players: { some: { user_id: player_id } }
       },
+      include: { players: true },
       orderBy: [
         { start_time: 'desc' },
         { id: 'desc' },
@@ -49,25 +46,21 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     const board = activeBoard;
     const board_id = board.id;
 
-    const playerIds = [
-      board.player1,
-      board.player2,
-      board.player3,
-      board.player4,
-    ].filter((pid): pid is string => !!pid && pid !== "");
+    const playerIds = board.players.map(p => p.user_id);
 
     // ---- fetch pawns for this board ----
-    const pawns = await prisma.pawn.findMany({
-      where: { board_id },
-      orderBy: [{ player_id: 'asc' }, { id: 'asc' }]
+    const pawnsRaw = await prisma.pawn.findMany({
+      where: { boardPlayer: { board_id } },
+      include: { boardPlayer: true },
+      orderBy: [{ board_player_id: 'asc' }, { id: 'asc' }]
     });
+    const pawns = pawnsRaw.map(mapPawnToClient);
 
     // ---- fetch players aggregation ----
     let players: {
       player_id: string;
       playerName: string;
       kills: number;
-      current_dice_roll_balance: number;
       current_move_balance: number;
       diamonds: number;
       moves: number;
@@ -82,28 +75,26 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
         select: {
           id: true,
           name: true,
-          current_dice_roll_balance: true,
-          current_move_balance: true,
           diamonds: true
         }
       });
       // Merge with pawn stats natively
       players = usersInfo.map((u) => {
-        const userPawns = pawns.filter((p: import("@prisma/client").Pawn) => p.player_id === u.id);
-        const homeCount = userPawns.filter((p: import("@prisma/client").Pawn) => p.type === 'center').length;
-        const totalKills = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.kills || 0), 0);
-        const totalMoves = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.moves || 0), 0);
-        const totalMovesLost = userPawns.reduce((sum: number, p: import("@prisma/client").Pawn) => sum + (p.moves_lost || 0), 0);
-        const color = userPawns.length > 0 ? userPawns[0].color : "";
-        const maxMovedAt = userPawns.reduce((max: Date | null, p: import("@prisma/client").Pawn) => p.last_moved_at && (!max || p.last_moved_at > max) ? p.last_moved_at : max, null as Date | null);
+        const bp = board.players.find(p => p.user_id === u.id);
+        const userPawns = pawns.filter((p: MappedPawn) => bp && p.board_player_id === bp.id);
+        const homeCount = userPawns.filter((p: MappedPawn) => p.type === 'center').length;
+        const totalKills = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.kills || 0), 0);
+        const totalMoves = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.moves || 0), 0);
+        const totalMovesLost = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.moves_lost || 0), 0);
+        const color = userPawns.length > 0 ? (userPawns[0].color || "") : "";
+        const maxMovedAt = userPawns.reduce((max: Date | null, p: MappedPawn) => p.last_moved_at && (!max || p.last_moved_at > max) ? p.last_moved_at : max, null as Date | null);
 
         return {
           player_id: u.id,
           playerName: u.name,
           kills: totalKills,
-          current_dice_roll_balance: u.current_dice_roll_balance,
-          current_move_balance: u.current_move_balance,
-          diamonds: u.diamonds,
+          current_move_balance: 0,
+          diamonds: u.diamonds || 0,
           moves: totalMoves,
           moves_lost: totalMovesLost,
           color,
@@ -116,25 +107,25 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     }
 
     // ---- fetch dice values for this board ----
-    const diceRolls = await prisma.diceRoll.findMany({
-      where: { current_board_id: board_id },
-      include: { player: { select: { name: true } } },
+    const diceRolls = await prisma.boardPlayer.findMany({
+      where: { board_id },
+      include: { user: { select: { name: true } } },
       orderBy: { rolled_at: 'desc' }
     });
-    const dice_value = diceRolls.map((dr: import("@prisma/client").DiceRoll & { player?: { name: string | null } }) => ({
-      player_id: dr.player_id,
-      name: dr.player?.name,
+    const dice_value = diceRolls.map((dr: import("@prisma/client").BoardPlayer & { user?: { name: string | null } | null }) => ({
+      player_id: dr.user_id,
+      name: dr.user?.name,
       dice_value: dr.dice_value,
       rolled_at: dr.rolled_at
     }));
 
     // ---- helper functions ----
     const getWinPosition = (pid: string) => {
-      if (board.winner1 === pid) return 1;
-      if (board.winner2 === pid) return 2;
-      if (board.winner3 === pid) return 3;
-      if (board.loser === pid) return 4;
-      return null; // Game still in progress
+      const bp = board.players.find(p => p.user_id === pid);
+      if (bp && bp.rank !== null) {
+        return bp.rank;
+      }
+      return null;
     };
 
     const getRank = (pid: string, playersArr: typeof players) => {
@@ -213,8 +204,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
           kills: Number(r.kills ?? 0),
           color: r.color,
           home: Number(r.home ?? 0),
-          current_dice_roll_balance: Number(r.current_dice_roll_balance ?? 0),
-          moves: Number(r.moves ?? 0),
+          current_move_balance: Number(r.current_move_balance ?? 0),
           moves_lost: Number(r.moves_lost ?? 0),
           diamonds: Number(r.diamonds ?? 0),
           winPosition: getWinPosition(r.player_id),

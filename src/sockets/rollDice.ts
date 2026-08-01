@@ -1,7 +1,8 @@
 import prisma from "../config/prisma.js";
-import { Prisma, DiceRoll } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { canPlayerAct, recomputeTurnStateForBoard, advanceTurnAfterMove, startTurnTimer } from "./turnState.js"; 
 import handleFinalPos from "../utils/handleFinalPos.js";
+import { mapPawnToClient } from "../utils/positionMapper.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
 
@@ -17,8 +18,7 @@ export const rollDice = async (
     const { board_id, player_id } = payload ?? {};
 
     // 🎲 Securely generate dice roll on the backend (1-6)
-    // const dice_value = Math.floor(Math.random() * 6) + 1;
-    const dice_value = 2;
+    const dice_value = Math.floor(Math.random() * 6) + 1;
 
     // Basic validation
     if (!board_id || !player_id) {
@@ -45,11 +45,11 @@ export const rollDice = async (
     }
 
     // 🔒 PENDING DICE CHECK: Prevent re-rolling if they already have an unspent dice value
-    const existingRolls = await prisma.diceRoll.findFirst({
-      where: { player_id, dice_value: { not: null } }
+    const existingRolls = await prisma.boardPlayer.findUnique({
+      where: { board_id_user_id: { board_id, user_id: player_id } }
     });
     
-    if (existingRolls) {
+    if (existingRolls?.dice_value !== null && existingRolls?.dice_value !== undefined) {
       return safeAck({ ok: false, msg: "You must spend your active dice roll before rolling again." });
     }
 
@@ -62,24 +62,20 @@ export const rollDice = async (
 
     let valid_moves = false;
     let validPawnIds: string[] = [];
-    let allPlayers: (DiceRoll & { player?: { name: string | null } })[] = [];
+    let allPlayers: (import("@prisma/client").BoardPlayer & { user: { name: string } | null })[] = [];
 
     await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      // If dice is not 6, decrement the player's current_dice_roll_balance
-      if (dice_value !== 6) {
-        const u = await tx.user.findUnique({ where: { id: player_id } });
-        if (u && Number(u.current_dice_roll_balance || 0) > 0) {
-          await tx.user.update({
-            where: { id: player_id },
-            data: { current_dice_roll_balance: { decrement: 1 } }
-          });
-        }
-      }
+
 
       // Determine valid_moves completely on the backend
-      const playerPawns = await tx.pawn.findMany({
-        where: { board_id, player_id }
+      const bp = await tx.boardPlayer.findUnique({
+        where: { board_id_user_id: { board_id, user_id: player_id } }
       });
+      const playerPawnsRaw = bp ? await tx.pawn.findMany({
+        where: { board_player_id: bp.id },
+        include: { boardPlayer: true }
+      }) : [];
+      const playerPawns = playerPawnsRaw.map(mapPawnToClient);
 
 
     for (const pawn of playerPawns) {
@@ -92,26 +88,26 @@ export const rollDice = async (
     }
 
     // Store the roll in dice_rolls and dice_roll_logs
-      await tx.diceRoll.upsert({
-        where: { player_id },
-        update: { current_board_id: board_id, dice_value, rolled_at: new Date() },
-        create: { player_id, current_board_id: board_id, dice_value, rolled_at: new Date() }
+      await tx.boardPlayer.update({
+        where: { board_id_user_id: { board_id, user_id: player_id } },
+        data: { dice_value, rolled_at: new Date() }
       });
       
-      await tx.diceRollLog.create({
-        data: {
-          board_id,
-          player_id,
-          dice_value,
-          valid_moves: valid_moves,
-          rolled_at: new Date()
-        }
-      });
+      if (bp) {
+        await tx.diceRollLog.create({
+          data: {
+            board_player_id: bp.id,
+            dice_value,
+            valid_moves: valid_moves,
+            rolled_at: new Date()
+          }
+        });
+      }
 
       // Retrieve all players' dice for this board
-      const diceRollsList = await tx.diceRoll.findMany({
-        where: { current_board_id: board_id },
-        include: { player: { select: { name: true } } },
+      const diceRollsList = await tx.boardPlayer.findMany({
+        where: { board_id },
+        include: { user: { select: { name: true } } },
         orderBy: { rolled_at: 'desc' }
       });
       allPlayers = diceRollsList;
@@ -124,11 +120,11 @@ export const rollDice = async (
       dice_value,
       isAllPawnsLocked: valid_moves === false, // for client animation timing
       allPlayersDice: allPlayers.map(p => ({
-        player_id: p.player_id,
-        playerName: p.player?.name,
+        player_id: p.user_id,
+        playerName: p.user?.name,
         dice_value: p.dice_value,
         rolled_at: p.rolled_at,
-        isDiceRolling: p.player_id === player_id // only rolling player has animation
+        isDiceRolling: p.user_id === player_id // only rolling player has animation
       }))
     };
 
@@ -184,16 +180,15 @@ export const rollDice = async (
       console.log(`Auto-clearing dice for ${player_id} (no valid moves)`);
       
       // Clear the roller's dice_value in DB (same as old diceClear)
-      await prisma.diceRoll.upsert({
-        where: { player_id },
-        update: { current_board_id: board_id, dice_value: null, rolled_at: new Date() },
-        create: { player_id, current_board_id: board_id, dice_value: null, rolled_at: new Date() }
+      await prisma.boardPlayer.update({
+        where: { board_id_user_id: { board_id, user_id: player_id } },
+        data: { dice_value: null, rolled_at: new Date() }
       });
 
       // Get updated dice state after clearing
-      const updatedPlayers = await prisma.diceRoll.findMany({
-        where: { current_board_id: board_id },
-        include: { player: { select: { name: true } } },
+      const updatedPlayers = await prisma.boardPlayer.findMany({
+        where: { board_id },
+        include: { user: { select: { name: true } } },
         orderBy: { rolled_at: 'desc' }
       });
 
@@ -201,9 +196,9 @@ export const rollDice = async (
         board_id,
         player_id,
         dice_value: null,
-        allPlayersDice: updatedPlayers.map((p: DiceRoll & { player?: { name: string | null } }) => ({
-          player_id: p.player_id,
-          playerName: p.player?.name,
+        allPlayersDice: updatedPlayers.map((p) => ({
+          player_id: p.user_id,
+          playerName: p.user?.name,
           dice_value: p.dice_value,
           rolled_at: p.rolled_at
         }))

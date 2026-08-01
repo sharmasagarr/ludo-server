@@ -2,7 +2,7 @@ import type { GameSocket } from "../types/index.js";
 import prisma from "../config/prisma.js";
 import { Server } from "socket.io";
 
-import { User, Pawn, DiceRoll } from "@prisma/client";
+import { mapPawnToClient } from "../utils/positionMapper.js";
 
 interface TurnState {
   mode: string;
@@ -15,7 +15,7 @@ const boardTurnState: Record<string, TurnState> = {};
 const boardTurnTimers: Record<string, NodeJS.Timeout> = {};
 let handleTurnTimeout: (io: Server, board_id: string) => Promise<void>;
 
-export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true, skipBalanceReplenish: boolean = false) => {
+export const recomputeTurnStateForBoard = async (io: Server, board_id: string, shouldBroadcast: boolean = true, _skipBalanceReplenish: boolean = false) => {
   if (!board_id) return;
 
   // 1) find online players in this board (from sockets)
@@ -28,30 +28,15 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
 
   // 2) get dice balance of all players of this board
   const board = await prisma.board.findUnique({
-    where: { id: board_id }
+    where: { id: board_id },
+    include: { players: { orderBy: { seat_number: 'asc' } } }
   });
 
   if (!board) return;
 
-  const playerIds = [board.player1, board.player2, board.player3, board.player4].filter((pid): pid is string => !!pid);
+  const playerIds = board.players.map(p => p.user_id);
 
-  const users = await prisma.user.findMany({
-    where: { id: { in: playerIds } },
-    select: { id: true, current_dice_roll_balance: true }
-  });
-
-  const rows = users.map((u: Partial<User>) => ({
-    player_id: u.id,
-    current_dice_roll_balance: Number(u.current_dice_roll_balance || 0)
-  }));
-
-  const activeTurnPlayers = rows
-      .filter(
-          (r: { player_id?: string; current_dice_roll_balance: number }) =>
-          r.player_id &&
-          onlineIds.has(r.player_id)
-      )
-      .map((r: { player_id?: string }) => r.player_id as string);
+  const activeTurnPlayers = playerIds.filter((pid: string) => onlineIds.has(pid));
 
   let mode: string;
   let currentTurnPlayerId: string | null = null;
@@ -82,24 +67,7 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
   const timerNonce = Date.now();
   boardTurnState[board_id] = { mode, currentTurnPlayerId, turnOrder, timerNonce };
 
-  if (currentTurnPlayerId && !skipBalanceReplenish) {
-    try {
-      const u = await prisma.user.findUnique({ where: { id: currentTurnPlayerId } });
-      
-      if (u && Number(u.current_dice_roll_balance || 0) < 1) {
-        await prisma.user.update({
-          where: { id: currentTurnPlayerId },
-          data: { current_dice_roll_balance: 1 }
-        });
-        // Force an update to the connected players to unlock their UI
-        io.to(board_id).emit("playerStatsUpdated", [
-            { player_id: currentTurnPlayerId, current_dice_roll_balance: 1 }
-        ]);
-      }
-    } catch (e) {
-      console.error("Error replenishing balance on reconnect:", e);
-    }
-  }
+
 
   if (shouldBroadcast) {
     io.to(board_id).emit("turnStateUpdate", {
@@ -145,21 +113,18 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
   // 🛑 0) ANTI-CHEAT: FORCED AUTO-MOVE
   // If the player holds an active dice roll and has valid moves, force them to move!
   try {
-    const diceRoll = await prisma.diceRoll.findFirst({
-      where: {
-        player_id: timedOutPlayerId,
-        current_board_id: board_id,
-        dice_value: { not: null }
-      }
+    const bp = await prisma.boardPlayer.findUnique({
+      where: { board_id_user_id: { board_id, user_id: timedOutPlayerId } }
     });
 
-    if (diceRoll) {
-      const pendingDiceValue = diceRoll.dice_value;
-
-      const playerPawns = await prisma.pawn.findMany({
-        where: { board_id, player_id: timedOutPlayerId },
-        select: { id: true, current_position: true, color: true, type: true }
+    if (bp && bp.dice_value !== null && bp.dice_value !== undefined) {
+      const pendingDiceValue = bp.dice_value;
+      
+      const playerPawnsRaw = await prisma.pawn.findMany({
+        where: { board_player_id: bp.id },
+        include: { boardPlayer: true }
       });
+      const playerPawns = playerPawnsRaw.map(mapPawnToClient);
 
       const { default: handleFinalPos } = await import("../utils/handleFinalPos.js");
       let validPawns = [];
@@ -208,31 +173,21 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
 
   // 🛑 1) NO VALID MOVES:          // Clear dice row (set to null) instead of deleting
   try {
-    await prisma.diceRoll.upsert({
-      where: { player_id: timedOutPlayerId },
-      update: {
-        current_board_id: board_id,
-        dice_value: null,
-        rolled_at: new Date()
-      },
-      create: {
-        player_id: timedOutPlayerId,
-        current_board_id: board_id,
-        dice_value: null,
-        rolled_at: new Date()
-      }
+    await prisma.boardPlayer.update({
+      where: { board_id_user_id: { board_id, user_id: timedOutPlayerId } },
+      data: { dice_value: null, rolled_at: new Date() }
     });
 
     // Fetch refreshed players dice row to broadcast (as seen in rollDice auto-clear)
-    const diceRolls = await prisma.diceRoll.findMany({
-      where: { current_board_id: board_id },
-      include: { player: { select: { name: true } } },
+    const diceRolls = await prisma.boardPlayer.findMany({
+      where: { board_id },
+      include: { user: { select: { name: true } } },
       orderBy: { rolled_at: 'desc' }
     });
 
-    const updatedPlayers = diceRolls.map((dr: Partial<DiceRoll> & { player?: { name: string | null } }) => ({
-      player_id: dr.player_id,
-      name: dr.player?.name,
+    const updatedPlayers = diceRolls.map((dr: import("@prisma/client").BoardPlayer & { user?: { name: string | null } | null }) => ({
+      player_id: dr.user_id,
+      name: dr.user?.name,
       dice_value: dr.dice_value,
       rolled_at: dr.rolled_at
     }));
@@ -300,16 +255,7 @@ export const canPlayerAct = async (io: Server, board_id: string, player_id: stri
   }
   const state = boardTurnState[board_id];
 
-  const u = await prisma.user.findUnique({
-    where: { id: player_id },
-    select: { current_dice_roll_balance: true }
-  });
 
-  const balance = Number(u?.current_dice_roll_balance ?? 0);
-
-  if (balance <= 0) {
-    return { ok: false, reason: "NO_BALANCE" };
-  }
 
   if (!state || state.mode === "waiting") {
     return { ok: false, reason: "WAITING_FOR_PLAYERS" };
@@ -339,65 +285,14 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
     return;
   }
 
-  const uInfo = await prisma.user.findUnique({
-    where: { id: lastPlayerId },
-    select: { current_dice_roll_balance: true }
-  });
-  const finalBalance = Number(uInfo?.current_dice_roll_balance || 0);
-
-  // If you rolled a 6 OR you earned an extra roll (e.g. via a capture or reaching home), you keep the turn!
-  if ((Number(dice_value) === 6 || finalBalance > 0) && turnOrder.includes(lastPlayerId)) {
+  // If you rolled a 6, you keep the turn!
+  if ((Number(dice_value) === 6) && turnOrder.includes(lastPlayerId)) {
     state.currentTurnPlayerId = lastPlayerId;
   } else {
     let idx = turnOrder.indexOf(lastPlayerId);
     if (idx === -1) idx = 0;
     const nextIdx = (idx + 1) % turnOrder.length;
     state.currentTurnPlayerId = turnOrder[nextIdx];
-  }
-
-  // Ensure the incoming turn player has a dice roll balance of 1 so their client UI unlocks
-  if (state.currentTurnPlayerId) {
-    try {
-      await prisma.user.update({
-        where: { id: state.currentTurnPlayerId },
-        data: { current_dice_roll_balance: 1 }
-      });
-      
-      const board = await prisma.board.findUnique({ where: { id: board_id } });
-      if (!board) return;
-      const playerIds = [board.player1, board.player2, board.player3, board.player4].filter((pid): pid is string => !!pid);
-
-      const users = await prisma.user.findMany({
-        where: { id: { in: playerIds } },
-        select: {
-          id: true,
-          name: true,
-          current_dice_roll_balance: true,
-          current_move_balance: true,
-        }
-      });
-      
-      const pawns = await prisma.pawn.findMany({
-        where: { board_id }
-      });
-
-      const parsedPlayers = users.map((u: Partial<User>) => {
-        const userPawns = pawns.filter((p: Pawn) => p.player_id === u.id);
-        const color = userPawns.length > 0 ? userPawns[0].color : "";
-        return {
-          player_id: u.id,
-          playerName: u.name,
-          current_dice_roll_balance: Number(u.current_dice_roll_balance ?? 0),
-          current_move_balance: Number(u.current_move_balance ?? 0),
-          color
-        };
-      });
-
-      io.to(board_id).emit("playerStatsUpdated", parsedPlayers);
-      
-    } catch (err) {
-      console.error("Failed to replenish dice roll balance:", err);
-    }
   }
 
   const timerNonce = Date.now();

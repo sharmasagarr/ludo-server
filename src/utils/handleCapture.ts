@@ -1,8 +1,8 @@
-import { Pawn } from "@prisma/client";
+import { MappedPawn } from "./positionMapper.js";
 
-export default function handleCapture(movedPawn: Pawn, allPawnsAfterMove: Pawn[]) {
+export default function handleCapture(movedPawn: MappedPawn, allPawnsAfterMove: MappedPawn[]) {
     let has_captured = 0;
-    let occupants: Pawn[] = [];
+    let occupants: MappedPawn[] = [];
     let captured_pawn_ids: string[] = [];
     let kills = 0;
     const SAFE_IDS = new Set([14, 4]);

@@ -68,12 +68,9 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
     const activeBoard = await prisma.board.findFirst({
       where: {
         status: "active",
-        OR: [
-          { player1: user.id },
-          { player2: user.id },
-          { player3: user.id },
-          { player4: user.id }
-        ]
+        players: {
+          some: { user_id: user.id }
+        }
       },
       select: {
         id: true,

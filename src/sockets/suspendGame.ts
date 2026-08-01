@@ -14,15 +14,9 @@ export const suspendGame = async (io: Server, socket: GameSocket, payload: { boa
   try {
     // 1) Delete all pawns to permanently disqualify the player
     await prisma.pawn.deleteMany({
-      where: { board_id, player_id }
+      where: { boardPlayer: { board_id, player_id } }
     });
     
-    // 2) Wipe their dice roll if they had a pending one
-    await prisma.diceRoll.updateMany({
-      where: { player_id, current_board_id: board_id },
-      data: { dice_value: null }
-    });
-
     // 3) Broadcast leaving visually to other players
     io.to(board_id).emit("playerLeft", {
        board_id,
