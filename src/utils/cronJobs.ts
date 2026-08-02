@@ -1,4 +1,5 @@
 import cron from "node-cron";
+import { BoardStatus } from "@prisma/client";
 import prisma from "../config/prisma.js";
 import { formatISTDateTimeForSQL, getISTDateTime } from "./istDateTime.js";
 
@@ -20,7 +21,7 @@ export const checkExpiredBoards = async (): Promise<void> => {
     const expiredBoards = await prisma.board.findMany({
       where: {
         end_time: { not: null, lte: new Date(nowStr) },
-        status: { not: "finished" }
+        status: { not: BoardStatus.finished }
       },
       include: {
         players: true
@@ -84,7 +85,7 @@ export const checkExpiredBoards = async (): Promise<void> => {
         await tx.board.update({
           where: { id: board.id },
           data: {
-            status: "finished",
+            status: BoardStatus.finished,
             end_time: endTimeIST
           }
         });
@@ -97,7 +98,7 @@ export const checkExpiredBoards = async (): Promise<void> => {
         const endTimeIST = new Date(formatISTDateTimeForSQL());
         await tx.board.update({
           where: { id: board.id },
-          data: { status: "finished", end_time: endTimeIST }
+          data: { status: BoardStatus.finished, end_time: endTimeIST }
         });
 
       console.log(`[Cron Job] Board ${board.id} marked as finished (winners already set)`);

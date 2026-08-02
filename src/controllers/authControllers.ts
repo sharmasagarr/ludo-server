@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import prisma from "../config/prisma.js";
+import { BoardStatus } from "@prisma/client";
 import { Request, Response } from "express";
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey";
@@ -67,7 +68,7 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
 
     const activeBoard = await prisma.board.findFirst({
       where: {
-        status: "active",
+        status: BoardStatus.active,
         players: {
           some: { user_id: user.id }
         }

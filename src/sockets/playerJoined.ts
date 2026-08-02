@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { BoardStatus, CellType } from "@prisma/client";
 import { recomputeTurnStateForBoard } from "./turnState.js"; 
 import { mapPawnToClient, MappedPawn } from "../utils/positionMapper.js";
 import { Server } from "socket.io";
@@ -26,7 +27,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     // ---- fetch active board for this player ----
     const activeBoard = await prisma.board.findFirst({
       where: {
-        status: "active",
+        status: BoardStatus.active,
         players: { some: { user_id: player_id } }
       },
       include: { players: true },
@@ -82,7 +83,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
       players = usersInfo.map((u) => {
         const bp = board.players.find(p => p.user_id === u.id);
         const userPawns = pawns.filter((p: MappedPawn) => bp && p.board_player_id === bp.id);
-        const homeCount = userPawns.filter((p: MappedPawn) => p.type === 'center').length;
+        const homeCount = userPawns.filter((p: MappedPawn) => p.type === CellType.center).length;
         const totalKills = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.kills || 0), 0);
         const totalMoves = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.moves || 0), 0);
         const totalMovesLost = userPawns.reduce((sum: number, p: MappedPawn) => sum + (p.moves_lost || 0), 0);
@@ -139,7 +140,7 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     // Get list of currently connected players BEFORE this join
     const socketsInRoom = await io.in(board_id).fetchSockets();
     const onlinePlayers = socketsInRoom.map((s) => ({
-      player_id: (s as unknown as GameSocket).player_id,
+      player_id: (s as unknown as GameSocket).player_id || (s.data as any)?.player_id,
       socketId: s.id,
       joinedAt: (s as unknown as GameSocket).joinedAt || null,
     }));
@@ -152,6 +153,9 @@ export const playerJoined = async (io: Server, socket: GameSocket, payload: { bo
     await socket.join(board_id);
     socket.board_id = board_id;
     socket.player_id = player_id;
+    socket.data = socket.data || {};
+    socket.data.player_id = player_id;
+    socket.data.board_id = board_id;
     (socket as GameSocket & { joinedAt?: string }).joinedAt = new Date().toISOString();
 
     console.log(

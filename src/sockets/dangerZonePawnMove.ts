@@ -2,7 +2,7 @@ import prisma from "../config/prisma.js";
 import handleDangerZoneMove from "../utils/handleDangerZoneMove.js";
 import { Server } from "socket.io";
 import { GameSocket } from "../types/index.js";
-import { Prisma } from "@prisma/client";
+import { Prisma, CellType } from "@prisma/client";
 import { mapPawnToClient, strToPos, MappedPawn } from "../utils/positionMapper.js";
 
 // Helper for generating player payload across both socket flows
@@ -63,7 +63,7 @@ export const buildPlayerStatsPayload = async (tx: import("@prisma/client").Prism
 };
 
 export const dangerZonePawnMove = async (io: Server, _socket: GameSocket, payload: { board_id: string; pawn_id: string; player_id: string; [key: string]: unknown }, ack?: (response?: unknown) => void) => {
-  const safeAck = (x: unknown) => { try { ack?.(x); } catch {} };
+  const safeAck = (x: unknown) => { try { ack?.(x); } catch {} return x as any; };
 
   try {
     const { board_id, pawn_id, player_id } = payload ?? {};
@@ -149,7 +149,7 @@ export const dangerZonePawnMove = async (io: Server, _socket: GameSocket, payloa
           await tx.pawn.update({
              where: { id: capturedPawn.id },
              data: {
-                cell_type: 'base',
+                cell_type: CellType.base,
                 prev_area: from_area,
                 prev_cell: from_cell,
                 current_area: null,
@@ -193,32 +193,7 @@ export const dangerZonePawnMove = async (io: Server, _socket: GameSocket, payloa
             prev_move_balance: 0
           });
 
-          // Auto unlock logic for captured player
-          const remainingMainPawns = await tx.pawn.count({
-            where: { board_player_id: flmBeforeMove.id, cell_type: 'main' }
-          });
-          const hasBasePawns = await tx.pawn.count({
-            where: { board_player_id: flmBeforeMove.id, cell_type: 'base' }
-          });
 
-          if (remainingMainPawns === 0 && hasBasePawns > 0) {
-            const homeAreaIdByColor: Record<string, number> = { blue: 1, red: 2, green: 3, yellow: 4, orange: 5, pink: 6 };
-            const reqColor = capturedPawn.color as string;
-            const { area: unlock_a, cell: unlock_c } = { area: homeAreaIdByColor[reqColor], cell: 14 };
-            
-            const basePawnsToUnlock = await tx.pawn.findMany({
-              where: { board_player_id: flmBeforeMove.id, cell_type: 'base' },
-              take: 1
-            });
-            
-            if (basePawnsToUnlock.length > 0) {
-              await tx.pawn.update({
-                where: { id: basePawnsToUnlock[0].id },
-                data: { cell_type: 'main', prev_area: null, prev_cell: null, current_area: unlock_a, current_cell: unlock_c, last_moved_at: new Date() }
-              });
-              changedPawnIds.add(basePawnsToUnlock[0].id);
-            }
-          }
         } else {
           // Pawn has heart, just remove heart
           await tx.pawn.update({ where: { id: capturedPawn.id }, data: { has_heart: false } });
@@ -264,7 +239,8 @@ export const dangerZonePawnMove = async (io: Server, _socket: GameSocket, payloa
         updatedPawns,
         updatedPlayers,
         movedPawn: backwardPawn,
-        moves_lost
+        moves_lost,
+        earnedExtraRoll: has_captured
       };
     });
 
@@ -277,10 +253,12 @@ export const dangerZonePawnMove = async (io: Server, _socket: GameSocket, payloa
       updatedPlayers: Record<string, unknown>[];
       movedPawn: MappedPawn | undefined;
       moves_lost: number;
+      earnedExtraRoll: boolean;
     };
 
     const delta = {
       success: true,
+      earnedExtraRoll: res.earnedExtraRoll,
       data: {
         board_id,
         updatedPawns: res.updatedPawns,

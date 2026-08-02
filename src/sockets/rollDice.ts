@@ -1,5 +1,5 @@
 import prisma from "../config/prisma.js";
-import { Prisma } from "@prisma/client";
+import { Prisma, CellType } from "@prisma/client";
 import { canPlayerAct, recomputeTurnStateForBoard, advanceTurnAfterMove, startTurnTimer } from "./turnState.js"; 
 import handleFinalPos from "../utils/handleFinalPos.js";
 import { mapPawnToClient } from "../utils/positionMapper.js";
@@ -79,7 +79,7 @@ export const rollDice = async (
 
 
     for (const pawn of playerPawns) {
-      if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
+      if (pawn.current_position === 'finished' || pawn.type === CellType.center) continue;
       const moveResult = handleFinalPos(pawn.current_position, dice_value, pawn.color as string, pawn.type as string);
       if (moveResult && !moveResult.error) {
         valid_moves = true;

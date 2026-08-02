@@ -1,3 +1,4 @@
+import { CellType } from "@prisma/client";
 import { MappedPawn } from "./positionMapper.js";
 
 export default function handleCapture(movedPawn: MappedPawn, allPawnsAfterMove: MappedPawn[]) {
@@ -15,14 +16,14 @@ export default function handleCapture(movedPawn: MappedPawn, allPawnsAfterMove: 
     const cellNum = Number.parseInt(parts[4], 10);
 
     const canCaptureHere = (() => {
-      if (movedPawn.type === "center" || movedPawn.type === "home") return false;
+      if (movedPawn.type === CellType.center || movedPawn.type === CellType.home) return false;
       return !SAFE_IDS.has(cellNum);
     })();
 
     if (canCaptureHere) {
         occupants = allPawnsAfterMove
         .filter(p => 
-          p.type === "main" &&
+          p.type === CellType.main &&
           p.current_position === movedPawn.current_position &&
           p.color !== movedPawn.color
         );

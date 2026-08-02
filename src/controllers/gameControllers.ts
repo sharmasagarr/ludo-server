@@ -1,15 +1,15 @@
 import prisma from "../config/prisma.js";
-import { Color } from "@prisma/client";
+import { Color, CellType, BoardCreationMode, BoardStatus } from "@prisma/client";
 import { Response } from "express";
 import { AuthRequest } from "../types/index.js";
 
-const PLAYER_COLORS = ['red', 'green', 'yellow', 'blue', 'orange', 'pink'];
+const PLAYER_COLORS = ['blue', 'green', 'red', 'yellow', 'orange', 'pink'];
 
 // Default colors for joining players (Blue first, opposite is Green, then Red, Yellow)
 const initializePawns = async (board_player_id: string): Promise<void> => {
   const pawnData = Array.from({ length: 4 }).map(() => ({
     board_player_id,
-    cell_type: "base" as const,
+    cell_type: CellType.base,
     is_safe: true,
   }));
   
@@ -30,8 +30,8 @@ export const createGame = async (req: AuthRequest, res: Response): Promise<void>
     const board = await prisma.board.create({
       data: {
         creator: player_id,
-        creation_mode: "manual",
-        status: "active",
+        creation_mode: BoardCreationMode.manual,
+        status: BoardStatus.active,
         players: {
           create: { 
             user_id: player_id, 

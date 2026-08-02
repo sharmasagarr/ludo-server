@@ -34,9 +34,9 @@ export const mapPawnToClient = (pawn: PawnWithBoardPlayer): MappedPawn => {
     color: pawn.boardPlayer?.color,
     board_id: pawn.boardPlayer?.board_id,
     player_id: pawn.boardPlayer?.user_id,
-    current_position: posToStr(pawn.current_area, pawn.current_cell),
-    prev_position: posToStr(pawn.prev_area, pawn.prev_cell),
-    next_position: posToStr(pawn.next_area, pawn.next_cell),
+    current_position: pawn.cell_type === CellType.center ? "finished" : posToStr(pawn.current_area, pawn.current_cell),
+    prev_position: pawn.cell_type === CellType.center ? "finished" : posToStr(pawn.prev_area, pawn.prev_cell),
+    next_position: pawn.cell_type === CellType.center ? "finished" : posToStr(pawn.next_area, pawn.next_cell),
     // Strip nested sensitive DB fields if necessary or leave them
     boardPlayer: undefined,
   } as MappedPawn;

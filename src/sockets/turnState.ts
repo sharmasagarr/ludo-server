@@ -2,6 +2,7 @@ import type { GameSocket } from "../types/index.js";
 import prisma from "../config/prisma.js";
 import { Server } from "socket.io";
 
+import { CellType } from "@prisma/client";
 import { mapPawnToClient } from "../utils/positionMapper.js";
 
 interface TurnState {
@@ -22,7 +23,7 @@ export const recomputeTurnStateForBoard = async (io: Server, board_id: string, s
   const socketsInRoom = await io.in(board_id).fetchSockets();
   const onlineIds = new Set(
   socketsInRoom
-      .map((s) => (s as unknown as GameSocket).player_id)
+      .map((s) => (s as unknown as GameSocket).player_id || (s.data as any)?.player_id)
       .filter(Boolean)
   );
 
@@ -130,7 +131,7 @@ handleTurnTimeout = async (io: Server, board_id: string) => {
       let validPawns = [];
 
       for (const pawn of playerPawns) {
-        if (pawn.current_position === 'finished' || pawn.type === 'center') continue;
+        if (pawn.current_position === 'finished' || pawn.type === CellType.center) continue;
         const currPos = pawn.current_position || "0"; 
         const moveResult = handleFinalPos(currPos, Number(pendingDiceValue || 0), String(pawn.color || "red"), String(pawn.type));
         if (moveResult && !moveResult.error) {
@@ -268,7 +269,7 @@ export const canPlayerAct = async (io: Server, board_id: string, player_id: stri
   return { ok: true, reason: "TURN_OK" };
 };
 
-export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPlayerId: string, dice_value: number | null) => {
+export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPlayerId: string, dice_value: number | null, earnedExtraRoll: boolean = false) => {
   console.log(`[DEBUG] advanceTurnAfterMove called | player: ${lastPlayerId} | dice_value: ${dice_value} | Number(dice): ${Number(dice_value)}`);
   if (!board_id || !lastPlayerId) return;
 
@@ -285,8 +286,8 @@ export const advanceTurnAfterMove = async (io: Server, board_id: string, lastPla
     return;
   }
 
-  // If you rolled a 6, you keep the turn!
-  if ((Number(dice_value) === 6) && turnOrder.includes(lastPlayerId)) {
+  // If you rolled a 6 or earned an extra roll (capture, home), you keep the turn!
+  if (earnedExtraRoll || (Number(dice_value) === 6) && turnOrder.includes(lastPlayerId)) {
     state.currentTurnPlayerId = lastPlayerId;
   } else {
     let idx = turnOrder.indexOf(lastPlayerId);

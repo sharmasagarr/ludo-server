@@ -1,5 +1,5 @@
 import prisma from "../config/prisma.js";
-import { Prisma } from "@prisma/client";
+import { Prisma, CellType, BoardStatus } from "@prisma/client";
 import { mapPawnToClient, strToPos, MappedPawn } from "../utils/positionMapper.js";
 import handleFinalPos from "../utils/handleFinalPos.js";
 import handleCapture from "../utils/handleCapture.js";
@@ -50,12 +50,13 @@ export const movePawn = async (
         throw new Error(`Invalid move: ${moveResult?.message || "Unknown error"}`);
       }
       
-      const { finalPosition, finalType, is_safe, moves, startPosition, finalCellNum } = moveResult;
+      const { finalPosition, finalType, is_safe, moves, finalCellNum } = moveResult;
       const finalCellId = finalCellNum as number | undefined;
       const finalMoves = moves as number;
 
       const affectedPlayerIds = new Set([player_id]);
       const changedPawnIds = new Set([pawn_id]);
+      let earnedExtraRoll = false;
 
       // 1) Update moving pawn
       const { area: next_area, cell: next_cell } = strToPos(finalPosition as string);
@@ -64,7 +65,7 @@ export const movePawn = async (
       await tx.pawn.update({
         where: { id: pawn_id },
         data: {
-          cell_type: finalType as import("@prisma/client").CellType,
+          cell_type: finalType as CellType,
           prev_area,
           prev_cell,
           current_area: next_area,
@@ -75,31 +76,13 @@ export const movePawn = async (
         }
       });
 
-      // Handle un-basing mechanics if moving into center/home
-      if (finalType === 'center' || finalType === 'home') {
-        const remainingMainPawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'main' } });
-        const hasBasePawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'base' } });
 
-        if (remainingMainPawns === 0 && hasBasePawns > 0) {
-          const basePawnsToUnlock = await tx.pawn.findMany({
-            where: { board_player_id: userBeforeMove.id, cell_type: 'base' },
-            take: 1
-          });
-          if (basePawnsToUnlock.length > 0) {
-            const { area: start_a, cell: start_c } = strToPos(startPosition as string);
-            await tx.pawn.update({
-              where: { id: basePawnsToUnlock[0].id },
-              data: { cell_type: 'main', prev_area: null, prev_cell: null, current_area: start_a, current_cell: start_c, last_moved_at: new Date() }
-            });
-            changedPawnIds.add(basePawnsToUnlock[0].id);
-          }
-        }
-      }
 
       // Check if finished logic
       if (finalType === 'center' || finalPosition === 'finished') {
+        earnedExtraRoll = true;
 
-        const finishedPawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: 'center' } });
+        const finishedPawns = await tx.pawn.count({ where: { board_player_id: userBeforeMove.id, cell_type: CellType.center } });
         if (finishedPawns === 4 && userBeforeMove.rank === null) {
           const finishedCount = await tx.boardPlayer.count({ where: { board_id, rank: { not: null } } });
           const newRank = finishedCount + 1;
@@ -110,7 +93,7 @@ export const movePawn = async (
             const loserBp = players.find(p => p.rank === null && p.id !== userBeforeMove.id);
             if (loserBp) {
               await tx.boardPlayer.update({ where: { id: loserBp.id }, data: { rank: 4, is_looser: true } });
-              await tx.board.update({ where: { id: board_id }, data: { status: "finished", end_time: new Date() } });
+              await tx.board.update({ where: { id: board_id }, data: { status: BoardStatus.finished, end_time: new Date() } });
             }
           }
         }
@@ -128,7 +111,8 @@ export const movePawn = async (
       if (!movedPawnCheck) throw new Error("Pawn not found after move");
       
       const captureResult = handleCapture(movedPawnCheck, allPawnsAfterMove);
-      const { has_captured, captured_pawn_ids, kills } = captureResult;
+      let { has_captured, captured_pawn_ids, kills } = captureResult;
+      if (has_captured) earnedExtraRoll = true;
 
       let captureLogs: Prisma.MoveLogCreateManyInput[] = [];
       
@@ -160,7 +144,7 @@ export const movePawn = async (
             await tx.pawn.update({
               where: { id: row.id },
               data: {
-                cell_type: 'base',
+                cell_type: CellType.base,
                 prev_area: from_area,
                 prev_cell: from_cell,
                 current_area: null,
@@ -209,26 +193,9 @@ export const movePawn = async (
             });
 
             // Auto-unlock
-            const remainingMainPawnsForCaptured = await tx.pawn.count({ where: { board_player_id: row.board_player_id, cell_type: 'main' } });
-            const hasBasePawnsForCaptured = await tx.pawn.count({ where: { board_player_id: row.board_player_id, cell_type: 'base' } });
+
             
-            if (remainingMainPawnsForCaptured === 0 && hasBasePawnsForCaptured > 0) {
-              const homeAreaIdByColor: Record<string, number> = { blue: 1, red: 2, green: 3, yellow: 4, orange: 5, pink: 6 };
-              const reqColor = row.color as string;
-              const { area: unlock_a, cell: unlock_c } = { area: homeAreaIdByColor[reqColor], cell: 14 };
-              const basePawnsToUnlockCaptured = await tx.pawn.findMany({
-                where: { board_player_id: row.board_player_id, cell_type: 'base' },
-                take: 1
-              });
-              
-              if (basePawnsToUnlockCaptured.length > 0) {
-                await tx.pawn.update({
-                  where: { id: basePawnsToUnlockCaptured[0].id },
-                  data: { cell_type: 'main', prev_area: null, prev_cell: null, current_area: unlock_a, current_cell: unlock_c, last_moved_at: new Date() }
-                });
-                changedPawnIds.add(basePawnsToUnlockCaptured[0].id);
-              }
-            }
+
           } else {
             await tx.pawn.update({ where: { id: row.id }, data: { has_heart: false } });
             changedPawnIds.add(row.id);
@@ -276,7 +243,8 @@ export const movePawn = async (
         finalCellId,
         finalMoves,
         movedPawnCheck,
-        original_dice_value: dice_value
+        original_dice_value: dice_value,
+        earnedExtraRoll
       };
     });
 
@@ -300,15 +268,20 @@ export const movePawn = async (
     io.to(board_id).emit("pawnMoved", delta);
     
     // Check danger zone trigger
+    let dangerZoneExtraRoll = false;
     const finalCellId = result.finalCellId;
     if (finalCellId === 18 || finalCellId === 7 || finalCellId === 3) {
       // NOTE: Pass null explicitly for 'ack' to avoid issues
-      await dangerZonePawnMove(io, socket, { board_id, pawn_id, player_id }, undefined);
+      const dangerResult = await dangerZonePawnMove(io, socket, { board_id, pawn_id, player_id }, undefined);
+      if (dangerResult && typeof dangerResult === 'object' && 'earnedExtraRoll' in dangerResult && dangerResult.earnedExtraRoll) {
+        dangerZoneExtraRoll = true;
+      }
     }
     
     // Advance turns
     const original_dice = result.original_dice_value;
-    await advanceTurnAfterMove(io, board_id, player_id, original_dice);
+    const earnedExtraRollFlag = result.earnedExtraRoll || dangerZoneExtraRoll;
+    await advanceTurnAfterMove(io, board_id, player_id, original_dice, earnedExtraRollFlag);
     
     return safeAck({ ok: true, msg: "Move committed & broadcast", ...delta });
 
